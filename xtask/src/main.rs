@@ -7,6 +7,7 @@ const USAGE: &str = "usage: cargo xtask <command>
 
 commands:
   ci [--quick]   fmt check, workspace lint policy, clippy -D warnings, tests (--quick skips clippy)
+  e2e [filter]   run the oxctl end-to-end tests (optionally filter by test name)
   schema         write the machine.toml JSON Schema to schemas/oxbox.machine.v1.json";
 
 fn root() -> PathBuf {
@@ -80,6 +81,13 @@ fn ci(quick: bool) -> Result<(), String> {
     cargo(&["test", "--workspace", "--locked"])
 }
 
+fn e2e(args: &[String]) -> Result<(), String> {
+    let mut command = vec!["test", "--locked", "--package", "oxctl", "--test", "e2e"];
+    command.push("--");
+    command.extend(args.iter().map(String::as_str));
+    cargo(&command)
+}
+
 fn schema() -> Result<(), String> {
     let out = root().join("schemas");
     std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
@@ -102,6 +110,7 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
         Some("ci") => ci(args.iter().any(|a| a == "--quick")),
+        Some("e2e") => e2e(&args[1..]),
         Some("schema") => schema(),
         _ => {
             eprintln!("{USAGE}");
