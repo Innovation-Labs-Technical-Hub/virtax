@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    name: ci (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # Windows joins once the named-pipe transport lands (the daemon is Unix-socket only today).
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-15]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      # rust-toolchain.toml pins the toolchain; rustup installs it on first use.
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo xtask ci
