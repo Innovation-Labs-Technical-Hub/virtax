@@ -93,7 +93,12 @@ including for errors.
 
 ## Conventions
 
-- Every crate inherits the workspace lints, which forbid `unsafe_code`. FFI crates will be explicit exceptions.
+- Requirements live in [`openspec/`](openspec/AGENTS.md): one spec per module, each requirement citing its BRD ID,
+  and decisions still TO BE CONFIRMED. Behaviour changes go through an OpenSpec change; `just spec` validates.
+- Engineering rules per area are in [`.principles/`](.principles/README.md); agents start from
+  [`AGENTS.md`](AGENTS.md), and every crate has its own `AGENTS.md`.
+
+- Every crate inherits the workspace lints, which forbid `unsafe_code`; the one exception is `crates/virtax-vmm-hv`, where every `unsafe` block needs a `SAFETY:` comment.
 - `virtax.v1` only takes additive changes; never reuse a proto field number.
 - Manifest top-level keys starting with `x-` are preserved across round trips. Engine-specific knobs go under
   `[engine_overrides.<engine>]`.
