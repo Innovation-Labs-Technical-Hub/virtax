@@ -532,7 +532,7 @@ fn kvm_guest_boots_through_virtaxctl_and_powers_off() {
     assert_eq!(v["summary"]["engine"], "virtax-vmm");
     let serial = Path::new(v["folder"].as_str().unwrap()).join("logs/serial.log");
 
-    // The test guest reboots right after printing its marker, which ends the VM by itself.
+    // The test guest powers off right after printing its markers, which ends the VM by itself.
     let (code, v) = env.json(&["vm", "start", "g"]);
     assert_eq!((code, v["state"].as_str()), (0, Some("succeeded")), "{v}");
     wait_for_state(&env, "g", "powered_off", Duration::from_secs(60));
@@ -543,35 +543,52 @@ fn kvm_guest_boots_through_virtaxctl_and_powers_off() {
         serial.display()
     );
 
-    // Keep the guest up, then power it off from outside.
+    // Keep the guest up; `vm stop` presses the ACPI power button and the guest shuts down.
     assert_eq!(
         env.json(&["vm", "set", "g", "--cmdline", "virtax.hold"]).0,
         0
     );
+    let wait_for_boot = |n: usize| {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        // acpid must be running before the button is pressed.
+        while std::fs::read_to_string(&serial)
+            .unwrap()
+            .matches("VIRTAX-GUEST-ACPID")
+            .count()
+            < n
+        {
+            assert!(
+                Instant::now() < deadline,
+                "boot {n} never reached userspace"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    };
     assert_eq!(env.json(&["vm", "start", "g"]).0, 0);
-    let deadline = Instant::now() + Duration::from_secs(60);
-    while std::fs::read_to_string(&serial)
-        .unwrap()
-        .matches("VIRTAX-GUEST-OK")
-        .count()
-        < 2
-    {
-        assert!(
-            Instant::now() < deadline,
-            "second boot never reached userspace"
-        );
-        std::thread::sleep(Duration::from_millis(100));
-    }
+    wait_for_boot(2);
     wait_for_state(&env, "g", "running", Duration::from_secs(1));
     let (code, v) = env.json(&["vm", "stop", "g"]);
-    assert_eq!(
-        (code, v["error"]["code"].as_str()),
-        (10, Some("VTX-ENG-010")),
-        "ACPI shutdown is not available yet"
+    assert_eq!((code, v["state"].as_str()), (0, Some("succeeded")), "{v}");
+    wait_for_state(&env, "g", "powered_off", Duration::from_secs(5));
+    assert!(
+        std::fs::read_to_string(&serial)
+            .unwrap()
+            .contains("VIRTAX-GUEST-POWER-BUTTON")
     );
+
+    // `--force` powers off without asking the guest.
+    assert_eq!(env.json(&["vm", "start", "g"]).0, 0);
+    wait_for_boot(3);
     let (code, v) = env.json(&["vm", "stop", "g", "--force"]);
     assert_eq!(code, 0, "{v}");
     wait_for_state(&env, "g", "powered_off", Duration::from_secs(5));
+    assert_eq!(
+        std::fs::read_to_string(&serial)
+            .unwrap()
+            .matches("VIRTAX-GUEST-POWER-BUTTON")
+            .count(),
+        1
+    );
 }
 
 #[test]

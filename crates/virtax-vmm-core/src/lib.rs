@@ -6,12 +6,14 @@ mod devices;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub mod layout;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+mod rtc;
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 mod vmm;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 mod x86;
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-pub use vmm::{DEFAULT_CMDLINE, VmConfig, VmExit, VmmError, run};
+pub use vmm::{DEFAULT_CMDLINE, VmConfig, VmControl, VmExit, VmmError, run};
 
 /// Whether this host can run virtax-vmm guests, with the reason when it cannot.
 pub fn host_supported() -> Result<(), String> {

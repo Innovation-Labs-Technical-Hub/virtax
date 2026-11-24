@@ -3,8 +3,9 @@
 //! The MADT lists every vCPU's local APIC and the I/O APIC, which is what lets Linux bring up more
 //! than one CPU. The FADT is hardware-reduced (no PM timer, SCI or fixed events) and points its sleep
 //! control register at [`SLEEP_CONTROL_PORT`]; together with the DSDT's `\_S5_` object that lets the
-//! guest power itself off. It also declares no PS/2 controller, VGA or CMOS RTC, so Linux does not
-//! probe hardware virtax-vmm does not emulate.
+//! guest power itself off. The DSDT also describes COM1, the CMOS RTC and a power button raised through
+//! a Generic Event Device. The FADT declares no PS/2 controller or VGA, so Linux does not probe hardware
+//! virtax-vmm does not emulate.
 
 use vm_memory::{Bytes, GuestAddress, GuestMemoryMmap};
 
@@ -25,6 +26,11 @@ pub const SLP_EN: u8 = 1 << 5;
 pub const SLP_TYP_SHIFT: u8 = 2;
 /// The SLP_TYP value `\_S5_` advertises for soft-off.
 pub const S5_SLP_TYP: u8 = 5;
+
+/// Interrupt of the Generic Event Device that delivers the power button.
+pub const GED_GSI: u32 = 5;
+/// ACPI notification value for "power button pressed" (ACPI 6.5 §5.6.6).
+const NOTIFY_POWER_BUTTON: u8 = 0x80;
 
 pub const LOCAL_APIC_ADDR: u32 = 0xfee0_0000;
 pub const IO_APIC_ADDR: u32 = 0xfec0_0000;
@@ -100,21 +106,46 @@ impl Table {
 /// platform Linux only gives ISA devices an interrupt when the firmware describes them.
 fn dsdt_aml() -> Vec<u8> {
     use super::aml;
+    use crate::devices::{COM1_BASE, COM1_IRQ};
     let com1 = aml::device(
         "COM1",
         [
             aml::name("_HID", aml::eisa_id("PNP0501")),
             aml::name("_UID", aml::integer(0)),
-            aml::name(
-                "_CRS",
-                aml::io_irq_resources(crate::devices::COM1_BASE, 8, crate::devices::COM1_IRQ as u8),
-            ),
+            aml::name("_CRS", aml::io_irq_resources(COM1_BASE, 8, COM1_IRQ as u8)),
+        ]
+        .concat(),
+    );
+    let rtc = aml::device(
+        "RTC_",
+        [
+            aml::name("_HID", aml::eisa_id("PNP0B00")),
+            aml::name("_CRS", aml::io_resources(crate::rtc::INDEX_PORT, 2)),
+        ]
+        .concat(),
+    );
+    let power_button = aml::device(
+        "PWRB",
+        [
+            aml::name("_HID", aml::eisa_id("PNP0C0C")),
+            aml::name("_UID", aml::integer(0)),
+        ]
+        .concat(),
+    );
+    // The Generic Event Device turns an interrupt on GED_GSI into a power-button notification.
+    let ged = aml::device(
+        "GED0",
+        [
+            aml::name("_HID", aml::string("ACPI0013")),
+            aml::name("_UID", aml::integer(0)),
+            aml::name("_CRS", aml::edge_interrupt_resources(GED_GSI)),
+            aml::method("_EVT", 1, aml::notify("_SB_", "PWRB", NOTIFY_POWER_BUTTON)),
         ]
         .concat(),
     );
     [
         aml::name("_S5_", aml::byte_package(&[S5_SLP_TYP, 0])),
-        aml::scope("_SB_", com1),
+        aml::scope("_SB_", [com1, rtc, power_button, ged].concat()),
     ]
     .concat()
 }
@@ -127,8 +158,8 @@ fn dsdt() -> Vec<u8> {
 
 const FADT_HW_REDUCED_ACPI: u32 = 1 << 20;
 const FADT_RESET_REG_SUP: u32 = 1 << 10;
-/// IAPC_BOOT_ARCH: VGA not present, CMOS RTC not present; the 8042 bit stays clear (no PS/2).
-const IAPC_BOOT_ARCH: u16 = (1 << 2) | (1 << 5);
+/// IAPC_BOOT_ARCH: VGA not present; the 8042 bit stays clear (no PS/2). The CMOS RTC is present.
+const IAPC_BOOT_ARCH: u16 = 1 << 2;
 
 fn fadt(dsdt_addr: u64) -> Vec<u8> {
     let mut t = Table::new(b"FACP", 6);
@@ -273,13 +304,36 @@ mod tests {
             ]
         );
         let scope = &aml[11..];
-        assert_eq!((scope[0], &scope[2..6]), (0x10, &b"_SB_"[..]));
+        assert_eq!(scope[0], 0x10, "ScopeOp");
+        // PkgLength: the top two bits of the lead byte count the extra length bytes.
+        let extra = usize::from(scope[1] >> 6);
+        let len = if extra == 0 {
+            usize::from(scope[1])
+        } else {
+            (1..=extra).fold(usize::from(scope[1] & 0x0f), |acc, i| {
+                acc | usize::from(scope[1 + i]) << (4 + 8 * (i - 1))
+            })
+        };
         assert_eq!(
-            scope[1] as usize,
+            len,
             scope.len() - 1,
             "scope PkgLength covers the rest of the DSDT"
         );
-        assert!(scope.windows(4).any(|w| w == b"COM1"));
+        assert_eq!(&scope[2 + extra..6 + extra], b"_SB_");
+        for device in [
+            &b"COM1"[..],
+            b"RTC_",
+            b"PWRB",
+            b"GED0",
+            b"ACPI0013",
+            b"_EVT",
+        ] {
+            assert!(
+                scope.windows(device.len()).any(|w| w == device),
+                "{}",
+                String::from_utf8_lossy(device)
+            );
+        }
         assert!(
             scope
                 .windows(5)

@@ -55,14 +55,14 @@ them; `make <recipe>` forwards to the same recipes, with arguments in `ARGS="...
 just doctor        # what this host can run: KVM, busybox-static, test guest, dev daemon
 just ci            # fmt check, lint policy, clippy -D warnings, all tests
 just guest         # pinned Ubuntu test kernel + busybox initramfs in .cache/guest
-just boot 4 512 virtax.poweroff   # boot it directly with virtax-vmm (cpus, MiB, kernel args)
+just boot 4 512                  # boot it directly with virtax-vmm (cpus, MiB); the guest powers off
 just kvm-test      # the tests that boot real guests on KVM
 
 just dev-up        # background dev daemon: data in .cache/dev, socket in $XDG_RUNTIME_DIR/virtax-dev
 just demo          # create + start a KVM guest "demo" and show its console
 just ctl vm list   # any virtaxctl command against the dev daemon
 just events --since 0
-just ctl vm stop demo --force
+just ctl vm stop demo            # ACPI power button; --force powers off at once
 just dev-down      # dev-reset also deletes the dev data
 ```
 

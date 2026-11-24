@@ -75,7 +75,7 @@ guest:
 kvm-test: guest
     cargo xtask kvm-test
 
-# Boot the test guest directly with virtax-vmm, e.g. `just boot 4 512 virtax.poweroff`.
+# Boot the test guest directly with virtax-vmm, e.g. `just boot 4 512 virtax.hold` (Ctrl-C stops it).
 boot cpus="2" memory="512" cmdline="": guest
     @cargo build -q -p virtax-vmm
     @{{bin}}/virtax-vmm --kernel {{guest}}/vmlinuz --initrd {{guest}}/initramfs.cpio \
@@ -142,7 +142,7 @@ demo name="demo" cpus="2": guest dev-up
     folder="$({{ctl}} --json vm show "{{name}}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["folder"])')"
     for _ in $(seq 50); do grep -q VIRTAX-GUEST-OK "$folder/logs/serial.log" 2>/dev/null && break; sleep 0.1; done
     grep VIRTAX-GUEST "$folder/logs/serial.log" | tail -3
-    echo "running; stop it with: just ctl vm stop {{name}} --force"
+    echo "running; shut it down with: just ctl vm stop {{name}}"
 
 # Show a machine's serial console log, e.g. `just serial demo`.
 serial name="demo":

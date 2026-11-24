@@ -57,10 +57,10 @@ catalogue! {
         "Thao tác đã bị huỷ.", "Run the command again if you still need it.";
     ENG_NOT_AVAILABLE = "VTX-ENG-002", "The engine for this machine is not available on this host.",
         "Engine của máy ảo này không có trên máy chủ.", "Install the required engine or move the machine to an available one.";
-    ENG_UNSUPPORTED = "VTX-ENG-010", "This engine cannot do that yet.",
-        "Engine này chưa hỗ trợ thao tác đó.", "For virtax-vmm machines, power off with `virtaxctl vm stop --force`.";
     ENG_VM_CONFIG = "VTX-ENG-011", "The machine configuration cannot run on this engine.",
         "Cấu hình máy ảo không chạy được trên engine này.", "See the detail, change the setting with `virtaxctl vm set`, then start again.";
+    ENG_SHUTDOWN_TIMEOUT = "VTX-ENG-012", "The guest did not shut down after the power button was pressed.",
+        "Máy ảo không tắt sau khi nhấn nút nguồn.", "Check that the guest handles the power button (systemd-logind or acpid), or use `virtaxctl vm stop --force`.";
     ENG_FAILED = "VTX-ENG-999", "The virtualization engine reported an error.",
         "Engine ảo hoá báo lỗi.", "Copy the technical details and check the machine log.";
 }

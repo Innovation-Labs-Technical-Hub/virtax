@@ -12,6 +12,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
+signal-hook = "0.4"
 virtax-vmm-core = { path = "../../crates/virtax-vmm-core" }
 
 [lints]

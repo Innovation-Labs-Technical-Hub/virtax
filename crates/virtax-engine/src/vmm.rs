@@ -29,6 +29,8 @@ use crate::{
 /// The line `virtax-vmm` prints on stderr once the guest is about to run (see `apps/virtax-vmm`).
 const READY_LINE: &str = "virtax-vmm: guest running";
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long an ACPI shutdown request waits for the guest to power off.
+const ACPI_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(120);
 /// Matches `virtax-vmm-core`'s ACPI MADT limit.
 const MAX_VCPUS: u32 = 254;
 
@@ -40,6 +42,8 @@ struct Machine {
     kill: Option<CancellationToken>,
     /// Resolved when the running process has exited and the state is final.
     exited: Option<tokio::sync::watch::Receiver<bool>>,
+    /// Process ID of the running `virtax-vmm`, for the power-button signal.
+    pid: Option<u32>,
 }
 
 struct Inner {
@@ -135,6 +139,24 @@ fn vmm_args(m: &MachineManifest, folder: &Path) -> Result<Vec<String>, EngineErr
         args.extend(["--cmdline".into(), cmdline.clone()]);
     }
     Ok(args)
+}
+
+async fn wait_exited(exited: &mut tokio::sync::watch::Receiver<bool>) {
+    while !*exited.borrow() {
+        if exited.changed().await.is_err() {
+            break;
+        }
+    }
+}
+
+/// `virtax-vmm` turns SIGTERM into an ACPI power-button press.
+fn press_power_button(pid: Option<u32>) -> std::io::Result<()> {
+    let pid = pid
+        .and_then(|p| i32::try_from(p).ok())
+        .and_then(rustix::process::Pid::from_raw)
+        .ok_or_else(|| std::io::Error::other("the VM process ID is unknown"))?;
+    rustix::process::kill_process(pid, rustix::process::Signal::TERM)?;
+    Ok(())
 }
 
 impl VirtaxVmmEngine {
@@ -269,6 +291,7 @@ impl VirtaxVmmEngine {
             if let Some(m) = machines.get_mut(&id) {
                 m.kill = Some(kill.clone());
                 m.exited = Some(exited_rx);
+                m.pid = child.id();
             }
         }
         let inner = Arc::clone(&self.inner);
@@ -300,6 +323,7 @@ impl VirtaxVmmEngine {
             if let Some(m) = inner.machines.lock().unwrap().get_mut(&id) {
                 m.kill = None;
                 m.exited = None;
+                m.pid = None;
             }
             inner.set_state(id, state);
             let _ = exited_tx.send(true);
@@ -338,6 +362,7 @@ impl Engine for VirtaxVmmEngine {
             state: MachineState::PoweredOff,
             kill: None,
             exited: None,
+            pid: None,
         });
         entry.manifest = manifest.clone();
         entry.folder = folder.to_path_buf();
@@ -399,20 +424,14 @@ impl Engine for VirtaxVmmEngine {
     }
 
     async fn stop(&self, id: Uuid, mode: StopMode, op: OpHandle) -> Result<(), EngineError> {
-        if mode == StopMode::AcpiShutdown {
-            return Err(failed(
-                VtxCode::ENG_UNSUPPORTED,
-                "ACPI shutdown needs ACPI tables, which virtax-vmm does not provide yet",
-            ));
-        }
         let state = self.get(id)?;
         if !state.allows(Action::Stop) {
             return Err(EngineError::InvalidState(state));
         }
-        let (kill, exited) = {
+        let (kill, exited, pid) = {
             let machines = self.inner.machines.lock().unwrap();
             let m = machines.get(&id).ok_or(EngineError::NotFound(id))?;
-            (m.kill.clone(), m.exited.clone())
+            (m.kill.clone(), m.exited.clone(), m.pid)
         };
         let (Some(kill), Some(mut exited)) = (kill, exited) else {
             // Aborted with no process left: just record that it is off.
@@ -420,11 +439,36 @@ impl Engine for VirtaxVmmEngine {
             return Ok(());
         };
         self.inner.set_state(id, MachineState::Stopping);
-        op.progress(50, "powering off");
-        kill.cancel();
-        while !*exited.borrow() {
-            if exited.changed().await.is_err() {
-                break;
+        match mode {
+            StopMode::PowerOff => {
+                op.progress(50, "powering off");
+                kill.cancel();
+                wait_exited(&mut exited).await;
+            }
+            StopMode::AcpiShutdown => {
+                op.progress(20, "pressing the power button");
+                if let Err(e) = press_power_button(pid) {
+                    self.inner.set_state(id, state);
+                    return Err(failed(
+                        VtxCode::ENG_FAILED,
+                        format!("cannot signal virtax-vmm: {e}"),
+                    ));
+                }
+                op.progress(50, "waiting for the guest to shut down");
+                tokio::select! {
+                    _ = wait_exited(&mut exited) => {}
+                    _ = tokio::time::sleep(ACPI_SHUTDOWN_TIMEOUT) => {
+                        self.inner.set_state(id, state);
+                        return Err(failed(
+                            VtxCode::ENG_SHUTDOWN_TIMEOUT,
+                            format!("no shutdown within {} s of the power button", ACPI_SHUTDOWN_TIMEOUT.as_secs()),
+                        ));
+                    }
+                    _ = op.cancel.cancelled() => {
+                        self.inner.set_state(id, state);
+                        return Err(EngineError::Cancelled);
+                    }
+                }
             }
         }
         op.progress(100, "done");
@@ -492,6 +536,6 @@ mod tests {
             .stop(m.id, StopMode::AcpiShutdown, OpHandle::detached())
             .await
             .unwrap_err();
-        assert!(matches!(acpi, EngineError::Failed { ref code, .. } if code == "VTX-ENG-010"));
+        assert_eq!(acpi, EngineError::InvalidState(MachineState::PoweredOff));
     }
 }

@@ -4,6 +4,7 @@ use std::io::Write;
 
 use vm_superio::{Serial, Trigger};
 
+use crate::rtc::{self, Rtc};
 use crate::x86::acpi;
 use vmm_sys_util::eventfd::EventFd;
 
@@ -36,12 +37,14 @@ pub enum PioAction {
 }
 
 pub struct PioBus {
+    rtc: Rtc,
     serial: Serial<IrqTrigger, vm_superio::serial::NoEvents, Box<dyn Write + Send>>,
 }
 
 impl PioBus {
     pub fn new(serial_irq: EventFd, serial_out: Box<dyn Write + Send>) -> Self {
         Self {
+            rtc: Rtc::default(),
             serial: Serial::new(IrqTrigger(serial_irq), serial_out),
         }
     }
@@ -55,6 +58,7 @@ impl PioBus {
     pub fn read(&mut self, port: u16, data: &mut [u8]) {
         match (Self::uart_offset(port), data.len()) {
             (Some(offset), 1) => data[0] = self.serial.read(offset),
+            (None, 1) if port == rtc::DATA_PORT => data[0] = self.rtc.read(),
             // The i8042 status register: no data, input buffer empty.
             _ if port == I8042_COMMAND || port == I8042_DATA => data.fill(0),
             // ACPI sleep status: never asleep.
@@ -70,6 +74,10 @@ impl PioBus {
                 if let Err(e) = self.serial.write(offset, *value) {
                     tracing::warn!(error = ?e, "serial write failed");
                 }
+                PioAction::Continue
+            }
+            (None, [index]) if port == rtc::INDEX_PORT => {
+                self.rtc.select(*index);
                 PioAction::Continue
             }
             (None, [I8042_CMD_RESET]) if port == I8042_COMMAND => PioAction::Reset,

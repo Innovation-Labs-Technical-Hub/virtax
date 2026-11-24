@@ -100,19 +100,69 @@ pub fn eisa_id(id: &str) -> Vec<u8> {
     out
 }
 
+/// A string constant, e.g. a `_HID` such as `"ACPI0013"`.
+pub fn string(v: &str) -> Vec<u8> {
+    let mut out = vec![0x0d];
+    out.extend(v.as_bytes());
+    out.push(0);
+    out
+}
+
+fn resource_buffer(mut descriptors: Vec<u8>) -> Vec<u8> {
+    descriptors.extend([0x79, 0x00]); // end tag, checksum not used
+    let mut body = integer(descriptors.len() as u32);
+    body.extend(descriptors);
+    with_pkg(&[0x11], body)
+}
+
+fn io_descriptor(port: u16, len: u8) -> Vec<u8> {
+    let mut d = vec![0x47, 0x01];
+    d.extend(port.to_le_bytes());
+    d.extend(port.to_le_bytes());
+    d.extend([0x01, len]);
+    d
+}
+
+/// `ResourceTemplate () { IO (Decode16, port, port, 1, len) }`.
+pub fn io_resources(port: u16, len: u8) -> Vec<u8> {
+    resource_buffer(io_descriptor(port, len))
+}
+
 /// `ResourceTemplate () { IO (Decode16, port, port, 1, len) IRQNoFlags () { irq } }`.
 pub fn io_irq_resources(port: u16, len: u8, irq: u8) -> Vec<u8> {
     assert!(irq < 16, "IRQNoFlags covers ISA IRQs 0-15");
-    let mut res = vec![0x47, 0x01];
-    res.extend(port.to_le_bytes());
-    res.extend(port.to_le_bytes());
-    res.extend([0x01, len]);
-    res.push(0x22); // IRQ descriptor without flags: edge-triggered, active-high
-    res.extend((1u16 << irq).to_le_bytes());
-    res.extend([0x79, 0x00]); // end tag, checksum not used
-    let mut body = integer(res.len() as u32);
-    body.extend(res);
-    with_pkg(&[0x11], body)
+    let mut d = io_descriptor(port, len);
+    d.push(0x22); // IRQ descriptor without flags: edge-triggered, active-high
+    d.extend((1u16 << irq).to_le_bytes());
+    resource_buffer(d)
+}
+
+/// `ResourceTemplate () { Interrupt (ResourceConsumer, Edge, ActiveHigh, Exclusive) { gsi } }`.
+pub fn edge_interrupt_resources(gsi: u32) -> Vec<u8> {
+    // Extended interrupt descriptor: flags bit 0 = consumer, bit 1 = edge; one interrupt.
+    let mut d = vec![0x89];
+    d.extend(6u16.to_le_bytes());
+    d.extend([0x03, 0x01]);
+    d.extend(gsi.to_le_bytes());
+    resource_buffer(d)
+}
+
+/// `Method (NAME, args) { body }`, not serialized.
+pub fn method(n: &str, args: u8, body: Vec<u8>) -> Vec<u8> {
+    assert!(args <= 7, "AML methods take at most 7 arguments");
+    let mut b = name_seg(n).to_vec();
+    b.push(args);
+    b.extend(body);
+    with_pkg(&[0x14], b)
+}
+
+/// `Notify (\SCOPE.NAME, value)`.
+pub fn notify(scope: &str, device: &str, value: u8) -> Vec<u8> {
+    let mut out = vec![0x86, b'\\', 0x2e];
+    out.extend(name_seg(scope));
+    out.extend(name_seg(device));
+    out.extend(integer(u32::from(value)));
+    out
 }
 
 #[cfg(test)]
@@ -140,6 +190,29 @@ mod tests {
             vec![
                 0x08, b'_', b'S', b'5', b'_', 0x12, 0x05, 0x02, 0x0a, 0x05, 0x00
             ]
+        );
+    }
+
+    #[test]
+    fn power_button_pieces() {
+        assert_eq!(
+            string("ACPI0013"),
+            [&[0x0d][..], b"ACPI0013", &[0]].concat()
+        );
+        let irq = edge_interrupt_resources(5);
+        assert_eq!(&irq[4..13], &[0x89, 6, 0, 0x03, 1, 5, 0, 0, 0]);
+        assert_eq!(
+            notify("_SB_", "PWRB", 0x80),
+            [&[0x86, b'\\', 0x2e][..], b"_SB_PWRB", &[0x0a, 0x80]].concat()
+        );
+        let m = method("_EVT", 1, notify("_SB_", "PWRB", 0x80));
+        assert_eq!(
+            (m[0], m[1] as usize, &m[2..6], m[6]),
+            (0x14, m.len() - 1, &b"_EVT"[..], 1)
+        );
+        assert_eq!(
+            &io_resources(0x70, 2)[4..12],
+            &[0x47, 0x01, 0x70, 0x00, 0x70, 0x00, 0x01, 0x02]
         );
     }
 

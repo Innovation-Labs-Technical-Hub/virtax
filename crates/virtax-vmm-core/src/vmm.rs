@@ -39,6 +39,18 @@ impl VmConfig {
     }
 }
 
+/// Requests the host can send to a running guest.
+pub struct VmControl {
+    power_button: EventFd,
+}
+
+impl VmControl {
+    /// Press the ACPI power button. The guest decides what to do (usually an orderly shutdown).
+    pub fn press_power_button(&self) -> std::io::Result<()> {
+        self.power_button.write(1)
+    }
+}
+
 /// Why the VM stopped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VmExit {
@@ -91,7 +103,7 @@ fn vcpu_loop(mut vcpu: Vcpu, bus: &Mutex<PioBus>) -> Result<VmExit, VmmError> {
 }
 
 /// Boot the guest and run it until it powers off, reboots or crashes. `ready` runs once the VM is
-/// fully set up, just before the first instruction executes.
+/// fully set up, just before the first instruction executes, and receives the VM's controls.
 ///
 /// Every vCPU runs on its own thread. `run` returns as soon as any vCPU stops the VM; the other
 /// vCPU threads stay parked in the hypervisor until the process exits, which is how `virtax-vmm` (one
@@ -99,7 +111,7 @@ fn vcpu_loop(mut vcpu: Vcpu, bus: &Mutex<PioBus>) -> Result<VmExit, VmmError> {
 pub fn run(
     config: &VmConfig,
     serial_out: Box<dyn Write + Send>,
-    ready: impl FnOnce(),
+    ready: impl FnOnce(VmControl),
 ) -> Result<VmExit, VmmError> {
     if config.vcpus == 0 || config.vcpus > acpi::MAX_VCPUS {
         return Err(VmmError::Config(format!(
@@ -131,6 +143,8 @@ pub fn run(
     let vm = Vm::new(&memory)?;
     let serial_irq = EventFd::new(0)?;
     vm.register_irqfd(&serial_irq, COM1_IRQ)?;
+    let power_button = EventFd::new(0)?;
+    vm.register_irqfd(&power_button, acpi::GED_GSI)?;
     let bus = Arc::new(Mutex::new(PioBus::new(serial_irq, serial_out)));
     let cpuid = vm.supported_cpuid()?;
     let mut vcpus = Vec::with_capacity(config.vcpus.into());
@@ -146,7 +160,7 @@ pub fn run(
         vcpus.push(vcpu);
     }
     tracing::info!(vcpus = config.vcpus, memory_mib = config.memory_mib, kernel = %config.kernel.display(), %cmdline, "guest starting");
-    ready();
+    ready(VmControl { power_button });
 
     let (stopped_tx, stopped_rx) = mpsc::channel();
     for (id, vcpu) in vcpus.into_iter().enumerate() {
