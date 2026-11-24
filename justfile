@@ -61,6 +61,10 @@ ci:
 e2e *filter:
     cargo xtask e2e {{filter}}
 
+# Validate the OpenSpec specs and changes (strict), e.g. before merging a change.
+spec:
+    bunx @fission-ai/openspec@2.1.1 validate --all --strict --no-interactive
+
 # Regenerate schemas/virtax.machine.v1.json.
 schema:
     cargo xtask schema

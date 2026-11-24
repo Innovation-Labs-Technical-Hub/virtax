@@ -1,0 +1,41 @@
+schema: spec-driven
+context: |
+  Virtax rebuilds desktop virtualization (VirtualBox class) in Rust, GPL-3.0-or-later, as a three-phase
+  strangler: Phase 1 a new control plane (virtaxd, virtaxctl), Manager and Console on the VirtualBox 7.2 engine;
+  Phase 2 the Rust VMM virtax-vmm as an opt-in engine; Phase 3 virtax-vmm by default.
+
+  Requirement sources: the design set "OxBox Rust Rebuild" v1.0 (2026-10-30) — 13 bilingual BRDs (BRD-00 to
+  BRD-12), a module catalogue (34 modules) and a C4 architecture document. They live outside this repository.
+  Their provisional codename OxBox maps to Virtax (decision D5, confirmed 2026-11-24): oxboxd -> virtaxd,
+  oxctl -> virtaxctl, oxvmm -> virtax-vmm, OXE-* error codes -> VTX-*, oxbox.v1 -> virtax.v1.
+
+  Spec conventions:
+  - One capability per module, at <layer>/<module>: ui, control-plane, engine, platform; plus
+    general/common-requirements, quality/non-functional-requirements and governance/decisions-and-open-questions.
+  - Every requirement cites its source: a BRD ID (FR-..., NFR-..., Q-..., D1-D6) or, for "As built" requirements,
+    the code path and the test that verifies it. Never add a requirement without a source.
+  - Business decisions marked TO BE CONFIRMED stay open until the project owner confirms them. Never resolve one
+    by guessing; follow the proposed default and say so in the proposal.
+  - Requirement text is English; Vietnamese titles and terms are quoted from the BRDs where they appear.
+
+  Glossary (English, with Vietnamese from BRD-00):
+    - Strangler: Replacing a legacy system piece by piece while the new one gradually wraps it. (vi: Chiến lược thay hệ thống cũ từng phần, hệ thống mới "bao" dần hệ thống cũ.)
+    - HM / NEM: HM: VT-x/AMD-V via the vboxdrv driver. NEM: runs on the OS hypervisor API (KVM, WHP, HVF). (vi: HM: VT-x/AMD-V qua driver vboxdrv. NEM: chạy trên API hypervisor của OS (KVM, WHP, HVF).)
+    - virtio: High-performance paravirtual device standard with in-box Linux drivers; Windows uses virtio-win. (vi: Chuẩn thiết bị ảo hiệu năng cao, có driver sẵn trong Linux; Windows dùng virtio-win.)
+    - ioeventfd / irqfd: KVM mechanisms to signal I/O and inject interrupts in the kernel without exiting the vCPU to userspace. (vi: Cơ chế KVM báo I/O và inject interrupt trong kernel, không cần exit về userspace vCPU.)
+    - LRO / Operation: Long-running operation with progress, cancel and history. (vi: Thao tác chạy lâu, có tiến độ, huỷ và lịch sử.)
+    - BYO engine: Bring-your-own: use an already installed VirtualBox as the engine. (vi: Bring-your-own: dùng VirtualBox đã cài sẵn làm engine.)
+    - Engine Pack: The project's own GPLv3 VirtualBox 7.2 build with the shmfb adapter and performance patches. (vi: Bản build VirtualBox 7.2 GPLv3 do dự án đóng gói, có adapter shmfb và patch hiệu năng.)
+    - Apply mode: when a configuration change takes effect — Live, NextBoot or NeedsPowerOff (vi: chế độ áp dụng).
+    - Pending change: a change queued until the machine powers off (vi: thay đổi chờ áp dụng).
+rules:
+  proposal:
+  - Cite the FR, NFR, open question or decision IDs the change implements, and the capabilities it touches
+  - List any TO BE CONFIRMED decision the change depends on, and the default it follows
+  - State what is out of scope
+  specs:
+  - Keep the source citation on every ADDED or MODIFIED requirement
+  - Use one requirement per behaviour; keep requirement text under 500 characters and put detail in scenarios
+  tasks:
+  - Pair every behaviour task with the test that proves it; engine work needs a kvm_* test run by cargo xtask kvm-test
+  - End with cargo xtask ci, and cargo xtask kvm-test when the engine or VMM changed
