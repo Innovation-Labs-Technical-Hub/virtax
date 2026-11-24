@@ -47,7 +47,7 @@ has no stale branches.
 - [x] 4. Add `buf.yaml` with lint rules for the proto; `cargo xtask proto` runs `buf lint` and, on pull requests,
       `buf breaking --against` the base branch (pinned buf). Fix existing lint findings without breaking the wire
       format. Verify: renaming a field on a scratch branch fails the job.
-- [ ] 5. Add `cargo xtask multiuser-test` (Linux CI only, uses `sudo useradd`): start `virtaxd` as the runner user,
+- [x] 5. Add `cargo xtask multiuser-test` (Linux CI only, uses `sudo useradd`): start `virtaxd` as the runner user,
       loosen the socket mode as root, connect as the second user, and expect `PERMISSION_DENIED` with `VTX-API-403`;
       also expect `EACCES` with the default 0700/0600 permissions. Verify: the job is green, and disabling
       `check_peer` on a scratch branch makes it fail.
