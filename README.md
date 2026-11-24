@@ -17,6 +17,9 @@ then a Rust VMM (`oxvmm`). The design set (C4 architecture, BRDs, module index) 
 - Event streaming: every change is journaled with a gap-free `seq` and served by `Events.Watch`, which
   replays from a cursor and then follows live events. `oxctl events watch` resumes after daemon restarts.
   See [docs/events.md](docs/events.md).
+- Pending changes: on a running VM, changes that take effect at the next boot are queued, and changes that
+  need power-off are queued on request (`oxctl vm set --at-shutdown`). The queue is applied when the VM
+  powers off, at daemon startup, and before every start. `oxctl vm pending list|cancel` manages it.
 - `oxctl`, which can create, list, show, set, start, stop and delete VMs, plus `ops`, `events` and `version` commands.
   It supports `--json`, documented exit codes, and local `vm validate` / `vm schema`.
 
@@ -51,6 +54,21 @@ cargo run -p oxctl -- vm set web --memory 4096 --dry-run   # shows when each cha
 
 `OXBOX_SOCKET` and `OXBOX_DATA_DIR` override the socket and data locations. Unix socket paths must stay
 under 104 bytes.
+
+## End-to-end tests
+
+Run from the workspace root on Linux or macOS with the pinned Rust toolchain.
+
+```sh
+cargo xtask e2e                                # run the E2E suite
+cargo xtask e2e machine_lifecycle_through_cli  # filter by test name
+```
+
+The suite drives the real `oxctl` and `oxboxd` binaries through a private Unix socket. Each test daemon
+uses a temporary data directory and the simulated engine. VirtualBox, a guest image, and a separately
+running daemon are unnecessary. Coverage includes the VM lifecycle, stale etags, manifest recovery,
+single-instance enforcement, offline validation, and event replay across daemon restarts.
+`cargo xtask ci` also runs the suite on the existing CI matrix.
 
 ## oxctl exit codes
 

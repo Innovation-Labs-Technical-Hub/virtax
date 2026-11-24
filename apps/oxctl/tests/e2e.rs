@@ -2,26 +2,30 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
-/// `oxboxd` lives in another package, so build it (a no-op when current) and locate it next to `oxctl`.
-fn oxboxd_bin() -> PathBuf {
-    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
-    let status = Command::new(cargo)
-        .args(["build", "--quiet", "--package", "oxboxd"])
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .status()
-        .expect("run cargo build");
-    assert!(status.success(), "building oxboxd failed");
-    Path::new(env!("CARGO_BIN_EXE_oxctl"))
-        .with_file_name(format!("oxboxd{}", std::env::consts::EXE_SUFFIX))
+/// `oxboxd` lives in another package. Build it once, then reuse it across tests and restarts.
+fn oxboxd_bin() -> &'static Path {
+    static BIN: OnceLock<PathBuf> = OnceLock::new();
+    BIN.get_or_init(|| {
+        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+        let status = Command::new(cargo)
+            .args(["build", "--locked", "--quiet", "--package", "oxboxd"])
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .status()
+            .expect("run cargo build");
+        assert!(status.success(), "building oxboxd failed");
+        Path::new(env!("CARGO_BIN_EXE_oxctl"))
+            .with_file_name(format!("oxboxd{}", std::env::consts::EXE_SUFFIX))
+    })
 }
 
 struct Env {
     _data: tempfile::TempDir,
-    _run: tempfile::TempDir,
+    run: tempfile::TempDir,
     data_dir: PathBuf,
     socket: PathBuf,
     daemon: Option<Child>,
@@ -39,7 +43,7 @@ impl Env {
             data_dir: data.path().to_path_buf(),
             socket: run.path().join("d.sock"),
             _data: data,
-            _run: run,
+            run,
             daemon: None,
         };
         env.start_daemon();
@@ -61,13 +65,31 @@ impl Env {
     }
 
     fn start_daemon(&mut self) {
-        let child = self.daemon_cmd().spawn().expect("spawn oxboxd");
+        let log_path = self.run.path().join("oxboxd.stderr");
+        let log = std::fs::File::create(&log_path).expect("open oxboxd log");
+        let child = self.daemon_cmd().stderr(log).spawn().expect("spawn oxboxd");
         self.daemon = Some(child);
         let deadline = Instant::now() + Duration::from_secs(10);
-        while !self.socket.exists() {
+        loop {
+            let status = self
+                .daemon
+                .as_mut()
+                .unwrap()
+                .try_wait()
+                .expect("poll oxboxd");
+            assert!(
+                status.is_none(),
+                "oxboxd exited during startup ({status:?}):\n{}",
+                std::fs::read_to_string(&log_path).unwrap_or_default()
+            );
+            if self.socket.exists() && self.oxctl(&["version"]).status.success() {
+                return;
+            }
             assert!(
                 Instant::now() < deadline,
-                "oxboxd did not create its socket"
+                "oxboxd did not answer the version RPC at {}:\n{}",
+                self.socket.display(),
+                std::fs::read_to_string(&log_path).unwrap_or_default()
             );
             std::thread::sleep(Duration::from_millis(20));
         }
@@ -75,7 +97,21 @@ impl Env {
 
     fn stop_daemon(&mut self) {
         if let Some(mut child) = self.daemon.take() {
-            let _ = Command::new("kill").arg(child.id().to_string()).status();
+            if matches!(child.try_wait(), Ok(Some(_))) {
+                return;
+            }
+            let term = Command::new("kill").arg(child.id().to_string()).output();
+            if term.is_ok_and(|out| out.status.success()) {
+                let deadline = Instant::now() + Duration::from_secs(6);
+                while Instant::now() < deadline {
+                    match child.try_wait() {
+                        Ok(Some(_)) => return,
+                        Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+                        Err(_) => break,
+                    }
+                }
+            }
+            let _ = child.kill();
             let _ = child.wait();
         }
     }
@@ -349,4 +385,74 @@ fn events_watch_with_expired_cursor_asks_for_resync() {
         (code, v["error"]["code"].as_str()),
         (5, Some("OXE-API-410"))
     );
+}
+
+#[test]
+fn changes_queued_at_shutdown_apply_after_stop() {
+    let env = Env::new();
+    assert_eq!(
+        env.json(&["vm", "create", "--name", "q", "--memory", "1024"])
+            .0,
+        0
+    );
+    assert_eq!(env.json(&["vm", "start", "q"]).0, 0);
+
+    let (code, v) = env.json(&[
+        "vm",
+        "set",
+        "q",
+        "--memory",
+        "4096",
+        "--cpus",
+        "4",
+        "--tag",
+        "db",
+        "--at-shutdown",
+    ]);
+    assert_eq!(code, 0, "{v}");
+    let queued: Vec<(String, bool)> = v["field_results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| {
+            (
+                r["path"].as_str().unwrap().to_string(),
+                r["queued"].as_bool().unwrap(),
+            )
+        })
+        .collect();
+    assert!(
+        queued.contains(&("memory_mib".into(), true)) && queued.contains(&("tags".into(), false)),
+        "{queued:?}"
+    );
+
+    let (_, v) = env.json(&["vm", "pending", "list", "q"]);
+    assert_eq!(v.as_array().unwrap().len(), 2);
+    let (code, v) = env.json(&["vm", "pending", "cancel", "q", "cpu_count"]);
+    assert_eq!(code, 0);
+    assert_eq!(v.as_array().unwrap().len(), 1);
+    let (code, _) = env.json(&["vm", "pending", "cancel", "q", "cpu_count"]);
+    assert_eq!(code, 3, "already cancelled");
+    let (_, v) = env.json(&["vm", "list"]);
+    assert_eq!(v[0]["pending_change_count"], 1);
+
+    assert_eq!(env.json(&["vm", "stop", "q", "--force"]).0, 0);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let v = loop {
+        let (_, v) = env.json(&["vm", "show", "q"]);
+        if v["pending_changes"].as_array().unwrap().is_empty() || Instant::now() > deadline {
+            break v;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert!(
+        v["pending_changes"].as_array().unwrap().is_empty(),
+        "applied within 2 s: {v}"
+    );
+    assert_eq!(v["config"]["memory_mib"], 4096);
+    assert_eq!(
+        v["config"]["cpu_count"], 2,
+        "the cancelled change was not applied"
+    );
+    assert_eq!(v["config"]["tags"][0], "db");
 }

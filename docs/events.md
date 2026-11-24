@@ -26,7 +26,7 @@ watchers (`Events.Watch` in `crates/oxbox-api/proto/oxbox/v1/oxbox.proto`, `oxct
 | Kind | Resource | Payload |
 |---|---|---|
 | `machine.created` | `machines/{id}` | `{"summary": MachineSummary}` |
-| `machine.updated` | `machines/{id}` | `{"summary": …, "etag": "<new>", "changed": ["memory_mib", …]}` after `UpdateMachine`; `{"summary": …}` when startup reconcile re-imported a manifest or flagged the machine |
+| `machine.updated` | `machines/{id}` | After `UpdateMachine`: `{"summary", "etag", "changed": [fields applied now], "queued": [fields queued until power-off]}`. When queued changes are applied: the same with `"applied_pending": true`. After `CancelPendingChange`: `{"summary", "etag", "cancelled_pending": [field]}`. After startup reconcile re-imports or flags a machine: `{"summary"}` |
 | `machine.state_changed` | `machines/{id}` | `{"state": "running"}` |
 | `machine.deleted` | `machines/{id}` | `{"files_deleted": false}` |
 | `operation.updated` | `operations/{id}` | `{"kind", "target", "state", "percent", "step", "done": false, "error": null}`. Every state change is recorded; progress ticks are recorded at most 4 times per second per operation |

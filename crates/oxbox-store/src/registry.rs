@@ -61,6 +61,28 @@ pub struct MachineRow {
     pub engine: EngineKind,
     pub config_rev: u64,
     pub summary: Option<MachineSummary>,
+    /// Number of queued `pending_changes`.
+    pub pending_count: u32,
+}
+
+/// A configuration change queued until the machine powers off.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PendingChange {
+    /// API field path, e.g. `memory_mib`.
+    pub field_path: String,
+    pub value_json: String,
+    /// `next_boot` or `needs_power_off`.
+    pub apply_mode: String,
+    pub created_at: String,
+}
+
+/// Pending-queue edits committed together with a configuration revision.
+#[derive(Debug, Default)]
+pub struct PendingEdit<'a> {
+    /// Upserted: a newer value for the same field replaces the older one.
+    pub queue: &'a [PendingChange],
+    /// Removed, e.g. because the field was just set live or was applied.
+    pub clear: &'a [String],
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -108,6 +130,7 @@ fn machine_row(row: &Row<'_>) -> rusqlite::Result<MachineRow> {
         engine: EngineKind::parse(&engine).unwrap_or(EngineKind::Mock),
         config_rev: row.get::<_, i64>(4)? as u64,
         summary: summary.and_then(|s| serde_json::from_str(&s).ok()),
+        pending_count: row.get::<_, i64>(6)? as u32,
     })
 }
 
@@ -126,7 +149,8 @@ fn op_row(row: &Row<'_>) -> rusqlite::Result<OperationRecord> {
     })
 }
 
-const MACHINE_COLS: &str = "id, name, folder, engine, config_rev, summary_json";
+const MACHINE_COLS: &str = "id, name, folder, engine, config_rev, summary_json,
+    (SELECT COUNT(*) FROM pending_changes p WHERE p.machine_id = machines.id)";
 const OP_COLS: &str =
     "id, kind, target, state, percent, step, started_at, finished_at, error_json, result";
 
@@ -270,6 +294,17 @@ impl Registry {
         expected_rev: u64,
         summary: &MachineSummary,
     ) -> Result<u64, StoreError> {
+        self.update_machine_with_pending(m, expected_rev, summary, PendingEdit::default())
+    }
+
+    /// Like `update_machine`, also queuing and clearing pending changes in the same transaction.
+    pub fn update_machine_with_pending(
+        &mut self,
+        m: &MachineManifest,
+        expected_rev: u64,
+        summary: &MachineSummary,
+        pending: PendingEdit<'_>,
+    ) -> Result<u64, StoreError> {
         let tx = self.conn.transaction()?;
         let id = m.id.to_string();
         let current: Option<i64> = tx
@@ -298,8 +333,42 @@ impl Registry {
         )
         .map_err(|e| name_conflict(e, &m.name))?;
         Self::replace_groups_and_tags(&tx, m)?;
+        for path in pending.clear {
+            tx.execute(
+                "DELETE FROM pending_changes WHERE machine_id = ?1 AND field_path = ?2",
+                params![id, path],
+            )?;
+        }
+        for p in pending.queue {
+            tx.execute(
+                "INSERT INTO pending_changes(machine_id, field_path, value_json, apply_mode, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(machine_id, field_path) DO UPDATE SET value_json = excluded.value_json,
+                   apply_mode = excluded.apply_mode, created_at = excluded.created_at",
+                params![id, p.field_path, p.value_json, p.apply_mode, p.created_at],
+            )?;
+        }
         tx.commit()?;
         Ok(next)
+    }
+
+    /// Queued changes for a machine, oldest first.
+    pub fn pending_changes(&self, id: Uuid) -> Result<Vec<PendingChange>, StoreError> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT field_path, value_json, apply_mode, created_at FROM pending_changes
+             WHERE machine_id = ?1 ORDER BY created_at, field_path",
+        )?;
+        let rows = stmt
+            .query_map([id.to_string()], |r| {
+                Ok(PendingChange {
+                    field_path: r.get(0)?,
+                    value_json: r.get(1)?,
+                    apply_mode: r.get(2)?,
+                    created_at: r.get(3)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
     }
 
     /// Refresh the cached read model without touching the configuration revision.
@@ -593,6 +662,51 @@ mod tests {
             "numbering continues after a full trim"
         );
         assert_eq!(reg.append_event("r", "k", "{}").unwrap().seq, 11);
+    }
+
+    #[test]
+    fn pending_changes_are_upserted_cleared_and_cascade() {
+        let mut reg = Registry::open_in_memory().unwrap();
+        let (m, s) = sample("p");
+        reg.insert_machine(&m, Path::new("/tmp/p"), &s).unwrap();
+        let change = |path: &str, v: &str| PendingChange {
+            field_path: path.into(),
+            value_json: v.into(),
+            apply_mode: "needs_power_off".into(),
+            created_at: now(),
+        };
+        let q = [change("memory_mib", "4096"), change("cpu_count", "4")];
+        reg.update_machine_with_pending(
+            &m,
+            1,
+            &s,
+            PendingEdit {
+                queue: &q,
+                clear: &[],
+            },
+        )
+        .unwrap();
+        let q = [change("memory_mib", "8192")];
+        let clear = ["cpu_count".to_string()];
+        reg.update_machine_with_pending(
+            &m,
+            2,
+            &s,
+            PendingEdit {
+                queue: &q,
+                clear: &clear,
+            },
+        )
+        .unwrap();
+        let pending = reg.pending_changes(m.id).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(
+            pending[0].value_json, "8192",
+            "newer value replaces the older one"
+        );
+        assert_eq!(reg.get_machine(m.id).unwrap().unwrap().pending_count, 1);
+        reg.delete_machine(m.id).unwrap();
+        assert!(reg.pending_changes(m.id).unwrap().is_empty());
     }
 
     #[test]

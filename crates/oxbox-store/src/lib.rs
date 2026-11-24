@@ -8,7 +8,9 @@ pub mod registry;
 pub use error::StoreError;
 pub use folder_lock::FolderLock;
 pub use manifest_io::{ReadOutcome, read_manifest, write_manifest};
-pub use registry::{EventRecord, MachineRow, OperationRecord, Registry};
+pub use registry::{
+    EventRecord, MachineRow, OperationRecord, PendingChange, PendingEdit, Registry,
+};
 
 use std::path::PathBuf;
 

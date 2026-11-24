@@ -25,6 +25,8 @@ message MachineSummary {
   uint32 snapshot_count = 10;
   bool accessible = 11;
   string error_code = 12;
+  // Changes queued until the machine powers off.
+  uint32 pending_change_count = 13;
 }
 
 // The editable configuration fields. `UpdateMachine` field-mask paths use these field names.
@@ -52,6 +54,8 @@ message Machine {
   // The full `machine.toml` (read-only here).
   string manifest_toml = 5;
   string folder = 6;
+  // Changes queued until the machine powers off; applied before its next start.
+  repeated PendingChange pending_changes = 7;
 }
 
 message ListMachinesRequest {
@@ -88,6 +92,31 @@ message FieldResult {
   string path = 1;
   ApplyMode apply_mode = 2;
   repeated string issues = 3;
+  // True when the change was queued in pending_changes instead of applied now.
+  bool queued = 4;
+}
+
+// What to do with changes that need power-off while the machine is running.
+// Changes that take effect at the next boot are always queued on a running machine.
+enum ApplyPolicy {
+  // Refuse the whole update with FAILED_PRECONDITION (OXE-RT-002).
+  APPLY_POLICY_UNSPECIFIED = 0;
+  // Apply live fields now and queue the rest until the machine powers off.
+  APPLY_POLICY_QUEUE = 1;
+}
+
+message PendingChange {
+  // MachineConfig field name, as in update_mask.
+  string field_path = 1;
+  // The queued value as JSON.
+  string value_json = 2;
+  ApplyMode apply_mode = 3;
+  string created_at = 4;
+}
+
+message CancelPendingChangeRequest {
+  string name = 1;
+  string field_path = 2;
 }
 
 message UpdateMachineRequest {
@@ -97,6 +126,7 @@ message UpdateMachineRequest {
   string etag = 4;
   // Validate and report per-field ApplyMode without changing anything.
   bool validate_only = 5;
+  ApplyPolicy apply_policy = 6;
 }
 
 message UpdateMachineResponse {
@@ -135,6 +165,8 @@ service Machines {
   rpc UpdateMachine(UpdateMachineRequest) returns (UpdateMachineResponse);
   rpc DeleteMachine(DeleteMachineRequest) returns (DeleteMachineResponse);
   rpc ValidateManifest(ValidateManifestRequest) returns (ValidateManifestResponse);
+  // Drop one queued change; returns the machine with its remaining queue.
+  rpc CancelPendingChange(CancelPendingChangeRequest) returns (Machine);
 }
 
 message OperationError {

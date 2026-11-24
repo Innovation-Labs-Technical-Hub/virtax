@@ -87,6 +87,16 @@ impl Machines for Api {
         Ok(Response::new(pb::DeleteMachineResponse {}))
     }
 
+    async fn cancel_pending_change(
+        &self,
+        req: Request<pb::CancelPendingChangeRequest>,
+    ) -> Result<Response<pb::Machine>, Status> {
+        let r = req.into_inner();
+        Ok(Response::new(
+            self.0.cancel_pending(&r.name, &r.field_path).await?,
+        ))
+    }
+
     async fn validate_manifest(
         &self,
         req: Request<pb::ValidateManifestRequest>,

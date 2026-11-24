@@ -23,6 +23,8 @@ use uuid::Uuid;
 
 use crate::error::{ApiError, ApiResult};
 use crate::events::{BROADCAST_BUFFER, operation_payload, summary_payload};
+use crate::pending::{apply_mode_name, config_value, needs_power_off};
+use oxbox_store::{PendingChange, PendingEdit};
 
 /// API field-mask path → manifest field path.
 pub const MASK_PATHS: &[(&str, &str)] = &[
@@ -93,6 +95,7 @@ pub fn summary_to_pb(s: &MachineSummary) -> pb::MachineSummary {
         snapshot_count: s.snapshot_count,
         accessible: s.accessible,
         error_code: s.error_code.clone().unwrap_or_default(),
+        pending_change_count: 0,
     }
 }
 
@@ -112,7 +115,11 @@ fn config_from_manifest(m: &MachineManifest) -> pb::MachineConfig {
 }
 
 /// Copy one API field into the manifest.
-fn apply_field(m: &mut MachineManifest, c: &pb::MachineConfig, api_path: &str) -> ApiResult<()> {
+pub(crate) fn apply_field(
+    m: &mut MachineManifest,
+    c: &pb::MachineConfig,
+    api_path: &str,
+) -> ApiResult<()> {
     match api_path {
         "display_name" => m.name = c.display_name.trim().to_string(),
         "os_type" => m.os_type = c.os_type.clone(),
@@ -143,14 +150,14 @@ fn apply_field(m: &mut MachineManifest, c: &pb::MachineConfig, api_path: &str) -
     Ok(())
 }
 
-fn manifest_path_of(api_path: &str) -> Option<&'static str> {
+pub(crate) fn manifest_path_of(api_path: &str) -> Option<&'static str> {
     MASK_PATHS
         .iter()
         .find(|(a, _)| *a == api_path)
         .map(|(_, m)| *m)
 }
 
-fn invalid_manifest(issues: &[oxbox_model::Issue]) -> ApiError {
+pub(crate) fn invalid_manifest(issues: &[oxbox_model::Issue]) -> ApiError {
     let detail = issues
         .iter()
         .map(ToString::to_string)
@@ -259,7 +266,7 @@ impl Daemon {
         self.registry.lock().unwrap().schema_version().unwrap_or(0)
     }
 
-    fn engine(&self, kind: EngineKind) -> ApiResult<Arc<dyn Engine>> {
+    pub(crate) fn engine(&self, kind: EngineKind) -> ApiResult<Arc<dyn Engine>> {
         self.engines.get(&kind).cloned().ok_or_else(|| {
             OxeError::with(
                 OxeCode::ENG_NOT_AVAILABLE,
@@ -269,7 +276,7 @@ impl Daemon {
         })
     }
 
-    fn vm_lock(&self, id: Uuid) -> Arc<tokio::sync::Mutex<()>> {
+    pub(crate) fn vm_lock(&self, id: Uuid) -> Arc<tokio::sync::Mutex<()>> {
         self.vm_locks.lock().unwrap().entry(id).or_default().clone()
     }
 
@@ -301,23 +308,28 @@ impl Daemon {
         }
     }
 
-    fn load_manifest(row: &oxbox_store::MachineRow) -> ApiResult<MachineManifest> {
+    pub(crate) fn load_manifest(row: &oxbox_store::MachineRow) -> ApiResult<MachineManifest> {
         Ok(read_manifest(&row.folder)?.into_manifest())
     }
 
     fn machine_pb(
+        &self,
         row: &oxbox_store::MachineRow,
         m: &MachineManifest,
         summary: &MachineSummary,
-    ) -> pb::Machine {
-        pb::Machine {
+    ) -> ApiResult<pb::Machine> {
+        let pending = self.pending_changes(row.id)?;
+        let mut summary = summary_to_pb(summary);
+        summary.pending_change_count = pending.len() as u32;
+        Ok(pb::Machine {
             name: format!("machines/{}", row.id),
             etag: row.config_rev.to_string(),
-            summary: Some(summary_to_pb(summary)),
+            summary: Some(summary),
             config: Some(config_from_manifest(m)),
             manifest_toml: m.to_toml(),
             folder: row.folder.to_string_lossy().into_owned(),
-        }
+            pending_changes: pending,
+        })
     }
 
     /// Reconcile the registry with the manifests on disk and register machines with their engines.
@@ -381,6 +393,21 @@ impl Daemon {
                 }
             }
         }
+        // Changes queued before a restart are applied now for machines that are off.
+        let queued: Vec<Uuid> = self
+            .registry
+            .lock()
+            .unwrap()
+            .list_machines()?
+            .into_iter()
+            .filter(|r| r.pending_count > 0)
+            .map(|r| r.id)
+            .collect();
+        for id in queued {
+            if let Err(e) = self.apply_pending(id).await {
+                tracing::warn!(vm = %id, code = e.code.code, detail = ?e.detail, "pending changes not applied; they stay queued");
+            }
+        }
         Ok(())
     }
 
@@ -425,25 +452,24 @@ impl Daemon {
         }
     }
 
-    fn record_state(&self, id: Uuid, state: MachineState) {
-        let changed = {
+    fn record_state(self: &Arc<Self>, id: Uuid, state: MachineState) {
+        let (changed, has_pending) = {
             let mut reg = self.registry.lock().unwrap();
-            match reg.get_machine(id) {
-                Ok(Some(row)) => match row.summary {
-                    Some(mut s) if s.state != state => {
-                        s.state = state;
-                        match reg.set_summary(id, &s) {
-                            Ok(()) => true,
-                            Err(e) => {
-                                tracing::warn!(vm = %id, error = %e, "failed to update read model");
-                                false
-                            }
-                        }
-                    }
-                    _ => false,
-                },
-                _ => false,
+            let Ok(Some(row)) = reg.get_machine(id) else {
+                return;
+            };
+            let Some(mut summary) = row.summary else {
+                return;
+            };
+            if summary.state == state {
+                return;
             }
+            summary.state = state;
+            if let Err(e) = reg.set_summary(id, &summary) {
+                tracing::warn!(vm = %id, error = %e, "failed to update read model");
+                return;
+            }
+            (true, row.pending_count > 0)
         };
         if changed {
             self.emit(
@@ -452,16 +478,22 @@ impl Daemon {
                 serde_json::json!({ "state": state }),
             );
         }
+        if has_pending && matches!(state, MachineState::PoweredOff | MachineState::Aborted) {
+            self.spawn_apply_pending(id);
+        }
     }
 
     pub fn list(&self, state: &str, group: &str) -> ApiResult<Vec<pb::MachineSummary>> {
         let rows = self.registry.lock().unwrap().list_machines()?;
         Ok(rows
             .into_iter()
-            .filter_map(|r| r.summary)
-            .filter(|s| state.is_empty() || s.state.as_str() == state)
-            .filter(|s| group.is_empty() || s.groups.iter().any(|g| g == group))
-            .map(|s| summary_to_pb(&s))
+            .filter_map(|r| r.summary.map(|s| (s, r.pending_count)))
+            .filter(|(s, _)| state.is_empty() || s.state.as_str() == state)
+            .filter(|(s, _)| group.is_empty() || s.groups.iter().any(|g| g == group))
+            .map(|(s, pending)| pb::MachineSummary {
+                pending_change_count: pending,
+                ..summary_to_pb(&s)
+            })
             .collect())
     }
 
@@ -473,7 +505,7 @@ impl Daemon {
             .clone()
             .unwrap_or_else(|| MachineSummary::from_manifest(&manifest, MachineState::PoweredOff));
         summary.state = self.current_state(&row).await;
-        Ok(Self::machine_pb(&row, &manifest, &summary))
+        self.machine_pb(&row, &manifest, &summary)
     }
 
     pub async fn create(&self, req: pb::CreateMachineRequest) -> ApiResult<pb::Machine> {
@@ -613,6 +645,7 @@ impl Daemon {
             results.push(pb::FieldResult {
                 path: api.clone(),
                 apply_mode: api_apply_mode(mode) as i32,
+                queued: false,
                 issues: issues
                     .iter()
                     .filter(|i| i.path.starts_with(mpath))
@@ -620,48 +653,88 @@ impl Daemon {
                     .collect(),
             });
         }
+        // Decide per field: apply now, or queue until power-off.
+        let queue_policy = req.apply_policy == pb::ApplyPolicy::Queue as i32;
+        let mut now_paths = Vec::new();
+        let mut queued = Vec::new();
+        let mut blocked = Vec::new();
+        for r in &mut results {
+            let mode = pb::ApplyMode::try_from(r.apply_mode).unwrap_or(pb::ApplyMode::Live);
+            match mode {
+                pb::ApplyMode::NeedsPowerOff if !queue_policy => blocked.push(r.path.clone()),
+                pb::ApplyMode::NextBoot | pb::ApplyMode::NeedsPowerOff => {
+                    r.queued = true;
+                    queued.push(PendingChange {
+                        field_path: r.path.clone(),
+                        value_json: config_value(&config, &r.path)?.to_string(),
+                        apply_mode: apply_mode_name(mode).into(),
+                        created_at: now(),
+                    });
+                }
+                _ => now_paths.push(r.path.clone()),
+            }
+        }
         if req.validate_only {
             let summary = row.summary.clone().unwrap_or_else(|| {
                 MachineSummary::from_manifest(&manifest, MachineState::PoweredOff)
             });
             return Ok(UpdateOutcome {
-                machine: Self::machine_pb(&row, &manifest, &summary),
+                machine: self.machine_pb(&row, &manifest, &summary)?,
                 field_results: results,
             });
         }
         if !issues.is_empty() {
             return Err(invalid_manifest(&issues));
         }
-        if manifest.name != row.name
+        if !blocked.is_empty() {
+            return Err(needs_power_off(&blocked));
+        }
+        // What is written now: the current manifest plus the live fields only.
+        let mut current = Self::load_manifest(&row)?;
+        let mut changed_now = Vec::new();
+        for p in &now_paths {
+            apply_field(&mut current, &config, p)?;
+            changed_now.push(manifest_path_of(p).expect("validated path").to_string());
+        }
+        let issues = current.validate();
+        if !issues.is_empty() {
+            return Err(invalid_manifest(&issues));
+        }
+        if current.name != row.name
             && self
                 .registry
                 .lock()
                 .unwrap()
-                .find_by_name(&manifest.name)?
+                .find_by_name(&current.name)?
                 .is_some()
         {
-            return Err(OxeError::with(OxeCode::CFG_NAME_TAKEN, manifest.name.clone()).into());
+            return Err(OxeError::with(OxeCode::CFG_NAME_TAKEN, current.name.clone()).into());
         }
-        let blocked: Vec<_> = results
-            .iter()
-            .filter(|r| r.apply_mode == pb::ApplyMode::NeedsPowerOff as i32)
-            .map(|r| r.path.clone())
-            .collect();
-        if !blocked.is_empty() {
-            return Err(OxeError::with(OxeCode::RT_NEEDS_POWER_OFF, blocked.join(", ")).into());
+        if !changed_now.is_empty() {
+            engine.apply(&current, &changed_now).await?;
+            write_manifest(&row.folder, &current)?;
         }
-        engine.apply(&manifest, &changed).await?;
-        write_manifest(&row.folder, &manifest)?;
         let state = self.current_state(&row).await;
-        let summary = MachineSummary::from_manifest(&manifest, state);
-        self.registry
-            .lock()
-            .unwrap()
-            .update_machine(&manifest, row.config_rev, &summary)?;
+        let summary = MachineSummary::from_manifest(&current, state);
+        // A newer live edit of a field supersedes a value queued for it earlier.
+        let rev = self.registry.lock().unwrap().update_machine_with_pending(
+            &current,
+            row.config_rev,
+            &summary,
+            PendingEdit {
+                queue: &queued,
+                clear: &now_paths,
+            },
+        )?;
         drop(_serialized);
         let mut payload = summary_payload(&summary);
-        payload["etag"] = (row.config_rev + 1).to_string().into();
-        payload["changed"] = paths.clone().into();
+        payload["etag"] = rev.to_string().into();
+        payload["changed"] = now_paths.into();
+        payload["queued"] = queued
+            .iter()
+            .map(|q| q.field_path.clone())
+            .collect::<Vec<_>>()
+            .into();
         self.emit(&format!("machines/{}", row.id), "machine.updated", payload);
         Ok(UpdateOutcome {
             machine: self.get(&row.id.to_string()).await?,
@@ -731,6 +804,12 @@ impl Daemon {
             let guard = me.vm_lock(id);
             let _serialized = guard.lock().await;
             me.set_op(&op_for_task, |o| o.state = "running".into());
+            if action == Action::Start
+                && let Err(e) = me.apply_pending_locked(id).await
+            {
+                me.finish_op(&op_for_task, Err(e));
+                return;
+            }
             let result = match action {
                 Action::Start => engine.start(id, StartOpts { headless: true }, handle).await,
                 _ => {
@@ -1003,6 +1082,7 @@ pub(crate) mod tests {
             update_mask: mask(&["memory_mib"]),
             etag,
             validate_only,
+            apply_policy: 0,
         };
         let dry = d.update(req(current.etag.clone(), true)).await.unwrap();
         assert_eq!(
@@ -1018,6 +1098,188 @@ pub(crate) mod tests {
 
         let err = d.run_action("a", Action::Start, false).await.err().unwrap();
         assert_eq!(err.code, OxeCode::RT_ALREADY_IN_STATE);
+    }
+
+    fn update_req(
+        vm: &pb::Machine,
+        config: pb::MachineConfig,
+        paths: &[&str],
+        policy: pb::ApplyPolicy,
+    ) -> pb::UpdateMachineRequest {
+        pb::UpdateMachineRequest {
+            name: vm.name.clone(),
+            config: Some(config),
+            update_mask: mask(paths),
+            etag: vm.etag.clone(),
+            validate_only: false,
+            apply_policy: policy as i32,
+        }
+    }
+
+    async fn running(d: &Arc<Daemon>, name: &str) -> pb::Machine {
+        d.create(create_req(name)).await.unwrap();
+        let op = d.run_action(name, Action::Start, false).await.unwrap();
+        assert_eq!(wait_done(d, &op.name).await.state, "succeeded");
+        d.get(name).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn queued_changes_apply_after_power_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = daemon(dir.path());
+        d.spawn_event_pumps();
+        let vm = running(&d, "q").await;
+        let mut events = d
+            .watch_events(None, crate::events::EventFilter::default())
+            .unwrap();
+
+        // Live (tags), next boot (vram, always queued) and power-off (memory, queued on request).
+        let cfg = pb::MachineConfig {
+            tags: vec!["web".into()],
+            vram_mib: 64,
+            memory_mib: 4096,
+            ..Default::default()
+        };
+        let out = d
+            .update(update_req(
+                &vm,
+                cfg,
+                &["tags", "vram_mib", "memory_mib"],
+                pb::ApplyPolicy::Queue,
+            ))
+            .await
+            .unwrap();
+        let queued: Vec<_> = out
+            .field_results
+            .iter()
+            .map(|r| (r.path.as_str(), r.queued))
+            .collect();
+        assert_eq!(
+            queued,
+            vec![("tags", false), ("vram_mib", true), ("memory_mib", true)]
+        );
+        let m = out.machine;
+        assert_eq!(
+            m.config.as_ref().unwrap().tags,
+            vec!["web".to_string()],
+            "live field applied now"
+        );
+        assert_eq!(
+            m.config.as_ref().unwrap().memory_mib,
+            2048,
+            "queued field not applied yet"
+        );
+        assert_eq!(m.pending_changes.len(), 2);
+        assert_ne!(m.etag, vm.etag, "queuing bumps the etag");
+
+        // A newer queued value replaces the older one.
+        let cfg = pb::MachineConfig {
+            memory_mib: 8192,
+            ..Default::default()
+        };
+        let m = d
+            .update(update_req(&m, cfg, &["memory_mib"], pb::ApplyPolicy::Queue))
+            .await
+            .unwrap()
+            .machine;
+        assert_eq!(m.pending_changes.len(), 2);
+
+        let op = d.run_action("q", Action::Stop, true).await.unwrap();
+        wait_done(&d, &op.name).await;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let e = tokio::time::timeout_at(deadline, events.recv())
+                .await
+                .expect("applied within 2 s")
+                .unwrap()
+                .unwrap();
+            if e.payload_json.contains("applied_pending") {
+                break;
+            }
+        }
+        let m = d.get("q").await.unwrap();
+        let c = m.config.unwrap();
+        assert_eq!((c.memory_mib, c.vram_mib), (8192, 64));
+        assert!(m.pending_changes.is_empty());
+        assert_eq!(m.summary.unwrap().pending_change_count, 0);
+    }
+
+    #[tokio::test]
+    async fn power_off_changes_are_refused_without_queue_policy_and_can_be_cancelled() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = daemon(dir.path());
+        let vm = running(&d, "c").await;
+        let cfg = pb::MachineConfig {
+            cpu_count: 4,
+            vram_mib: 32,
+            ..Default::default()
+        };
+        let err = d
+            .update(update_req(
+                &vm,
+                cfg.clone(),
+                &["cpu_count", "vram_mib"],
+                pb::ApplyPolicy::Unspecified,
+            ))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(err.code, OxeCode::RT_NEEDS_POWER_OFF);
+        assert!(
+            d.get("c").await.unwrap().pending_changes.is_empty(),
+            "a refused update queues nothing"
+        );
+
+        let m = d
+            .update(update_req(
+                &vm,
+                cfg,
+                &["cpu_count", "vram_mib"],
+                pb::ApplyPolicy::Queue,
+            ))
+            .await
+            .unwrap()
+            .machine;
+        let m2 = d.cancel_pending("c", "cpu_count").await.unwrap();
+        assert_eq!(
+            m2.pending_changes
+                .iter()
+                .map(|p| p.field_path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["vram_mib"]
+        );
+        assert_ne!(m2.etag, m.etag);
+        assert_eq!(
+            d.cancel_pending("c", "cpu_count").await.err().unwrap().code,
+            OxeCode::API_NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
+    async fn queued_changes_survive_restart_and_apply_at_startup() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let d = daemon(dir.path());
+            let vm = running(&d, "r").await;
+            let cfg = pb::MachineConfig {
+                memory_mib: 3072,
+                ..Default::default()
+            };
+            d.update(update_req(
+                &vm,
+                cfg,
+                &["memory_mib"],
+                pb::ApplyPolicy::Queue,
+            ))
+            .await
+            .unwrap();
+        }
+        // The MockEngine does not survive a restart, so the machine comes back powered off.
+        let d = daemon(dir.path());
+        d.reconcile().await.unwrap();
+        let m = d.get("r").await.unwrap();
+        assert_eq!(m.config.unwrap().memory_mib, 3072);
+        assert!(m.pending_changes.is_empty());
     }
 
     #[tokio::test]
@@ -1037,6 +1299,7 @@ pub(crate) mod tests {
                 update_mask: mask(&["cpu_count"]),
                 etag: vm.etag.clone(),
                 validate_only: false,
+                apply_policy: 0,
             };
             d.update(up).await.unwrap();
         }

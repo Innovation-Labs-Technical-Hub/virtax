@@ -91,7 +91,14 @@ enum VmCmd {
         /// Report what would change and when it applies, without changing anything.
         #[arg(long)]
         dry_run: bool,
+        /// On a running machine, queue changes that need power-off instead of refusing them.
+        /// Changes that take effect at the next boot are always queued.
+        #[arg(long)]
+        at_shutdown: bool,
     },
+    /// Changes queued until the machine powers off.
+    #[command(subcommand)]
+    Pending(PendingCmd),
     /// Start a machine.
     Start {
         vm: String,
@@ -155,6 +162,14 @@ struct WaitArgs {
     /// Fail (exit 5) if the machine is already in the requested state.
     #[arg(long)]
     strict: bool,
+}
+
+#[derive(Subcommand)]
+enum PendingCmd {
+    /// List queued changes.
+    List { vm: String },
+    /// Drop one queued change, e.g. `memory_mib`.
+    Cancel { vm: String, field: String },
 }
 
 #[derive(Subcommand)]
@@ -496,7 +511,9 @@ async fn run_vm(ctx: &Ctx, cmd: VmCmd) -> Result<()> {
                     .map(|m| {
                         vec![
                             m.display_name.clone(),
-                            if m.accessible {
+                            if m.accessible && m.pending_change_count > 0 {
+                                format!("{} ({} pending)", m.state, m.pending_change_count)
+                            } else if m.accessible {
                                 m.state.clone()
                             } else {
                                 format!("inaccessible ({})", m.error_code)
@@ -530,13 +547,21 @@ async fn run_vm(ctx: &Ctx, cmd: VmCmd) -> Result<()> {
                     .as_ref()
                     .map(|s| s.state.clone())
                     .unwrap_or_default();
-                format!(
-                    "# {} ({state}, etag {})\n# folder: {}\n{}",
-                    m.name,
-                    m.etag,
-                    m.folder,
-                    m.manifest_toml.trim_end()
-                )
+                let mut out = format!(
+                    "# {} ({state}, etag {})\n# folder: {}\n",
+                    m.name, m.etag, m.folder
+                );
+                for p in &m.pending_changes {
+                    out.push_str(&format!(
+                        "# pending: {} = {} ({}, queued {})\n",
+                        p.field_path,
+                        p.value_json,
+                        output::apply_mode(p.apply_mode),
+                        p.created_at
+                    ));
+                }
+                out.push_str(m.manifest_toml.trim_end());
+                out
             });
         }
         VmCmd::Create {
@@ -575,6 +600,7 @@ async fn run_vm(ctx: &Ctx, cmd: VmCmd) -> Result<()> {
             config,
             etag,
             dry_run,
+            at_shutdown,
         } => {
             let (cfg, mask) = config_and_mask(name, config)?;
             if mask.is_empty() {
@@ -600,6 +626,11 @@ async fn run_vm(ctx: &Ctx, cmd: VmCmd) -> Result<()> {
                     update_mask: Some(prost_types::FieldMask { paths: mask }),
                     etag,
                     validate_only: dry_run,
+                    apply_policy: if at_shutdown {
+                        pb::ApplyPolicy::Queue
+                    } else {
+                        pb::ApplyPolicy::Unspecified
+                    } as i32,
                 })
                 .await?
                 .into_inner();
@@ -614,7 +645,11 @@ async fn run_vm(ctx: &Ctx, cmd: VmCmd) -> Result<()> {
                         .map(|f| {
                             vec![
                                 f.path.clone(),
-                                output::apply_mode(f.apply_mode).into(),
+                                if f.queued {
+                                    format!("{} (queued)", output::apply_mode(f.apply_mode))
+                                } else {
+                                    output::apply_mode(f.apply_mode).into()
+                                },
                                 f.issues.join("; "),
                             ]
                         })
@@ -655,11 +690,59 @@ async fn run_vm(ctx: &Ctx, cmd: VmCmd) -> Result<()> {
                 || format!("deleted {vm}"),
             );
         }
+        VmCmd::Pending(PendingCmd::List { vm }) => {
+            let m = ctx
+                .machines()
+                .get_machine(pb::GetMachineRequest { name: vm })
+                .await?
+                .into_inner();
+            print_pending(ctx, &m);
+        }
+        VmCmd::Pending(PendingCmd::Cancel { vm, field }) => {
+            let m = ctx
+                .machines()
+                .cancel_pending_change(pb::CancelPendingChangeRequest {
+                    name: vm,
+                    field_path: field,
+                })
+                .await?
+                .into_inner();
+            print_pending(ctx, &m);
+        }
         VmCmd::Validate { .. } | VmCmd::Schema => {
             unreachable!("handled without a daemon connection")
         }
     }
     Ok(())
+}
+
+fn print_pending(ctx: &Ctx, m: &pb::Machine) {
+    ctx.print(
+        json!(
+            m.pending_changes
+                .iter()
+                .map(output::pending)
+                .collect::<Vec<_>>()
+        ),
+        || {
+            if m.pending_changes.is_empty() {
+                return "no pending changes".into();
+            }
+            let rows: Vec<Vec<String>> = m
+                .pending_changes
+                .iter()
+                .map(|p| {
+                    vec![
+                        p.field_path.clone(),
+                        p.value_json.clone(),
+                        output::apply_mode(p.apply_mode).into(),
+                        p.created_at.clone(),
+                    ]
+                })
+                .collect();
+            output::table(&["FIELD", "VALUE", "APPLIES", "QUEUED AT"], &rows)
+        },
+    );
 }
 
 async fn run_ops(ctx: &Ctx, cmd: OpsCmd) -> Result<()> {

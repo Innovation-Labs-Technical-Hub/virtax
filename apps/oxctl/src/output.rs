@@ -16,6 +16,7 @@ pub fn summary(s: &pb::MachineSummary) -> Value {
         "engine": s.engine,
         "snapshot_count": s.snapshot_count,
         "accessible": s.accessible,
+        "pending_change_count": s.pending_change_count,
         "error_code": if s.error_code.is_empty() { Value::Null } else { json!(s.error_code) },
     })
 }
@@ -27,6 +28,7 @@ pub fn machine(m: &pb::Machine) -> Value {
         "etag": m.etag,
         "folder": m.folder,
         "summary": m.summary.as_ref().map(summary),
+        "pending_changes": m.pending_changes.iter().map(pending).collect::<Vec<_>>(),
         "config": {
             "display_name": c.display_name,
             "os_type": c.os_type,
@@ -66,8 +68,17 @@ pub fn apply_mode(mode: i32) -> &'static str {
     }
 }
 
+pub fn pending(p: &pb::PendingChange) -> Value {
+    json!({
+        "field": p.field_path,
+        "value": serde_json::from_str::<Value>(&p.value_json).unwrap_or(Value::Null),
+        "apply_mode": apply_mode(p.apply_mode),
+        "created_at": p.created_at,
+    })
+}
+
 pub fn field_result(r: &pb::FieldResult) -> Value {
-    json!({"path": r.path, "apply_mode": apply_mode(r.apply_mode), "issues": r.issues})
+    json!({"path": r.path, "apply_mode": apply_mode(r.apply_mode), "queued": r.queued, "issues": r.issues})
 }
 
 /// Left-aligned columns sized to their widest cell.

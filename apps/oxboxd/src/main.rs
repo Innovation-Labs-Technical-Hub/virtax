@@ -5,6 +5,7 @@ mod daemon;
 mod error;
 mod events;
 mod grpc;
+mod pending;
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
