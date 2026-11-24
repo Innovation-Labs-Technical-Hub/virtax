@@ -29,7 +29,7 @@
 
 ## 5. Integration checks
 
-- [ ] 5.1 Run `cargo xtask ci` and `cargo xtask kvm-test`; verify both pass locally and in the CI jobs, including the KVM job
+- [x] 5.1 Run `cargo xtask ci` and `cargo xtask kvm-test`; verify both pass locally and in the CI jobs, including the KVM job
 - [x] 5.2 Mark the implemented scenarios in the delta specs against their tests; verify `openspec validate add-virtio-blk-pci --strict` passes
 
 ## Workflow follow-up
