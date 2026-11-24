@@ -248,18 +248,18 @@ fn rejects_an_invalid_vcpu_count_before_touching_kvm() {
 #[test]
 fn an_invalid_disk_argument_exits_1_with_a_clear_message() {
     let out = Command::new(env!("CARGO_BIN_EXE_virtax-vmm"))
-        .args(["--kernel", "/nonexistent", "--disk", "a.img,rw"])
+        .args(["--kernel", "/nonexistent", "--disk", ",ro"])
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(1));
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("unknown option `rw`"), "{stderr}");
+    assert!(stderr.contains("missing image path"), "{stderr}");
     let help = Command::new(env!("CARGO_BIN_EXE_virtax-vmm"))
         .arg("--help")
         .output()
         .unwrap();
     assert!(help.status.success());
-    assert!(String::from_utf8_lossy(&help.stdout).contains("--disk <PATH[,ro]>"));
+    assert!(String::from_utf8_lossy(&help.stdout).contains("--disk <PATH[,ro|,rw]>"));
 }
 
 /// A raw image of `mib` MiB filled with zeros, in `dir`.

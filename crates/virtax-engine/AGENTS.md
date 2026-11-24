@@ -13,14 +13,16 @@ cargo test -p virtax-engine
 
 - `src/lib.rs`: the `Engine` trait, `ApplyMode`, `OpHandle` (progress and cancellation), `apply_mode_for`.
 - `src/mock.rs`: `MockEngine` with scriptable latency and failures (`fail_next`).
-- `src/vmm.rs`: `VirtaxVmmEngine` — builds `virtax-vmm` arguments from the manifest, waits for the ready line,
-  supervises the process, and maps its exit to `powered_off` or `aborted`.
+- `src/vmm.rs`: `VirtaxVmmEngine` — builds `virtax-vmm` arguments from the manifest (kernel, CPUs, memory, and
+  `--disk` for each attachment on a `virtio` controller), waits for the ready line, supervises the process, and
+  maps its exit to `powered_off` or `aborted`.
 
 ## Conventions
 
 - `virtaxd` uses only the trait; engine-specific behaviour stays in this crate.
 - State changes are broadcast as `EngineEvent::StateChanged`; the daemon keeps its read model warm from them.
-- Configuration a VM cannot run with fails with `VTX-ENG-011` before any process starts.
+- Configuration a VM cannot run with fails with `VTX-ENG-011` before any process starts, including disks on a
+  non-`virtio` bus, missing images and non-raw images (checked with `virtax_vmm_core::disk::detect_format`).
 
 ## Gotchas
 

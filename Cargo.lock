@@ -1731,6 +1731,7 @@ dependencies = [
  "tokio-util",
  "uuid",
  "virtax-model",
+ "virtax-vmm-core",
 ]
 
 [[package]]

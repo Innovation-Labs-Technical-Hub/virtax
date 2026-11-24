@@ -627,3 +627,80 @@ fn vmm_machines_explain_what_they_need_before_starting() {
     let (_, v) = env.json(&["vm", "show", "nokernel"]);
     assert_eq!(v["summary"]["state"], "powered_off");
 }
+
+/// Add a `virtio` controller with one disk at `path` to the machine's `machine.toml`.
+fn add_virtio_disk(folder: &Path, path: &str) {
+    let file = folder.join("machine.toml");
+    let mut m = virtax_model::parse_manifest(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    m.storage.controllers.push(virtax_model::StorageController {
+        name: "vd0".into(),
+        bus: virtax_model::Bus::Virtio,
+        attachments: vec![virtax_model::Attachment {
+            port: 0,
+            device: 0,
+            kind: virtax_model::DeviceKind::Disk,
+            medium: None,
+            path: Some(path.into()),
+            ssd: false,
+            discard: false,
+        }],
+    });
+    std::fs::write(&file, m.to_toml()).unwrap();
+}
+
+#[test]
+#[ignore = "needs /dev/kvm and `cargo xtask guest-kernel`; run with `cargo xtask kvm-test`"]
+fn kvm_manifest_disk_reaches_the_guest_through_virtaxctl() {
+    let mut env = Env::without_mock();
+    let (kernel, initrd) = (guest_file("vmlinuz"), guest_file("initramfs.cpio"));
+    let (code, v) = env.json(&[
+        "vm",
+        "create",
+        "--name",
+        "d",
+        "--engine",
+        "virtax-vmm",
+        "--memory",
+        "512",
+        "--kernel",
+        &kernel,
+        "--initrd",
+        &initrd,
+        "--cmdline",
+        "virtax.disktest",
+    ]);
+    assert_eq!(code, 0, "{v}");
+    let folder = PathBuf::from(v["folder"].as_str().unwrap());
+    let image = folder.join("disks").join("data.img");
+    std::fs::create_dir_all(image.parent().unwrap()).unwrap();
+    std::fs::File::create(&image)
+        .unwrap()
+        .set_len(16 << 20)
+        .unwrap();
+
+    // A disk added to machine.toml by hand, with a path relative to the machine folder.
+    env.stop_daemon();
+    add_virtio_disk(&folder, "disks/data.img");
+    env.start_daemon();
+
+    let (code, v) = env.json(&["vm", "start", "d"]);
+    assert_eq!((code, v["state"].as_str()), (0, Some("succeeded")), "{v}");
+    wait_for_state(&env, "d", "powered_off", Duration::from_secs(60));
+    let log = std::fs::read_to_string(folder.join("logs/serial.log")).unwrap();
+    assert!(log.contains("VIRTAX-DISK vda sectors=32768 ro=0"), "{log}");
+    assert!(log.contains("VIRTAX-DISK-WROTE vda"), "{log}");
+    assert!(
+        std::fs::read(&image)
+            .unwrap()
+            .starts_with(b"VIRTAX-DISK-PATTERN-vda"),
+        "the guest's write is not in the image"
+    );
+
+    // A missing image fails the start with VTX-ENG-011, and the machine stays off.
+    std::fs::remove_file(&image).unwrap();
+    let (code, v) = env.json(&["vm", "start", "d"]);
+    assert_ne!(code, 0, "{v}");
+    assert!(v.to_string().contains("VTX-ENG-011"), "{v}");
+    assert!(v.to_string().contains("data.img"), "{v}");
+    wait_for_state(&env, "d", "powered_off", Duration::from_secs(5));
+}

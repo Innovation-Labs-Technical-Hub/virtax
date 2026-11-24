@@ -39,10 +39,11 @@ struct Args {
     /// Exit when the guest reboots instead of restarting it.
     #[arg(long)]
     no_reboot: bool,
-    /// Attach a raw disk image as a virtio-blk device: `<path>` or `<path>,ro` for read-only.
+    /// Attach a raw disk image as a virtio-blk device: `<path>` or `<path>,rw` read-write,
+    /// `<path>,ro` read-only.
     /// Repeat for more disks; the guest sees them in this order (/dev/vda, /dev/vdb, ...). Each
     /// image is locked while the VM runs: exclusively when read-write, shared when read-only.
-    #[arg(long = "disk", value_name = "PATH[,ro]", value_parser = parse_disk)]
+    #[arg(long = "disk", value_name = "PATH[,ro|,rw]", value_parser = parse_disk)]
     disks: Vec<DiskArg>,
 }
 
@@ -54,17 +55,14 @@ struct DiskArg {
 }
 
 fn parse_disk(value: &str) -> Result<DiskArg, String> {
-    let (path, read_only) = match value.rsplit_once(',') {
-        Some((path, "ro")) => (path, true),
-        Some((_, option)) => {
-            return Err(format!(
-                "unknown option `{option}` (expected `<path>` or `<path>,ro`)"
-            ));
-        }
-        None => (value, false),
+    // A trailing `,ro` or `,rw` is the mode; any other comma belongs to the path.
+    let (path, read_only) = if let Some(path) = value.strip_suffix(",ro") {
+        (path, true)
+    } else {
+        (value.strip_suffix(",rw").unwrap_or(value), false)
     };
     if path.is_empty() {
-        return Err("missing image path".into());
+        return Err("missing image path (expected `<path>`, `<path>,ro` or `<path>,rw`)".into());
     }
     Ok(DiskArg {
         path: PathBuf::from(path),
@@ -205,11 +203,19 @@ mod tests {
         assert_eq!((d.path, d.read_only), (PathBuf::from("a.img"), false));
         let d = parse_disk("/x/b,c.img,ro").unwrap();
         assert_eq!((d.path, d.read_only), (PathBuf::from("/x/b,c.img"), true));
-        assert!(
-            parse_disk("a.img,rw")
-                .unwrap_err()
-                .contains("unknown option")
+        let d = parse_disk("/x/b,c.img,rw").unwrap();
+        assert_eq!((d.path, d.read_only), (PathBuf::from("/x/b,c.img"), false));
+        let d = parse_disk("a,b.img").unwrap();
+        assert_eq!(
+            d.path,
+            PathBuf::from("a,b.img"),
+            "commas inside paths are kept"
         );
-        assert!(parse_disk(",ro").is_err());
+        assert!(
+            parse_disk(",ro")
+                .unwrap_err()
+                .contains("missing image path")
+        );
+        assert!(parse_disk("").is_err());
     }
 }

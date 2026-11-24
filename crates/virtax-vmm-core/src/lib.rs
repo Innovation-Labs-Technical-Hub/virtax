@@ -3,7 +3,8 @@
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 mod devices;
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+/// Raw disk images; portable to every Unix host so `VirtaxVmmEngine` can check images before start.
+#[cfg(unix)]
 pub mod disk;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub mod layout;

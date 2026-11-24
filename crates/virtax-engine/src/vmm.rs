@@ -19,7 +19,9 @@ use tokio::sync::{broadcast, oneshot};
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
-use virtax_model::{Action, Arch, EngineKind, MachineManifest, MachineState, VtxCode};
+use virtax_model::{
+    Action, Arch, Bus, DeviceKind, EngineKind, MachineManifest, MachineState, VtxCode,
+};
 
 use crate::{
     ApplyMode, Engine, EngineCaps, EngineError, EngineEvent, HostInfo, OpHandle, StartOpts,
@@ -81,6 +83,82 @@ fn resolve(folder: &Path, path: &str) -> PathBuf {
     }
 }
 
+/// `--disk` arguments for every attachment on the machine's `virtio` controllers, in controller then
+/// port order, or why one cannot be attached. Disks are read-write unless they are DVDs or the user
+/// cannot write the image.
+fn disk_args(m: &MachineManifest, folder: &Path) -> Result<Vec<String>, EngineError> {
+    let config = |message: String| failed(VtxCode::ENG_VM_CONFIG, message);
+    let mut args = Vec::new();
+    for controller in &m.storage.controllers {
+        if controller.attachments.is_empty() {
+            continue;
+        }
+        if controller.bus != Bus::Virtio {
+            return Err(config(format!(
+                "storage controller `{}` is on the {} bus; virtax-vmm attaches disks on `virtio` \
+                 controllers only (change its `bus` in machine.toml)",
+                controller.name,
+                format!("{:?}", controller.bus).to_lowercase()
+            )));
+        }
+        let mut attachments: Vec<_> = controller.attachments.iter().collect();
+        attachments.sort_by_key(|a| (a.port, a.device));
+        for a in attachments {
+            let label = format!("`{}` port {}", controller.name, a.port);
+            let read_only = match a.kind {
+                DeviceKind::Disk => false,
+                DeviceKind::Dvd => true,
+                DeviceKind::Floppy => {
+                    return Err(config(format!(
+                        "attachment {label} is a floppy; virtax-vmm attaches disks and DVDs only"
+                    )));
+                }
+            };
+            let Some(path) = &a.path else {
+                if a.kind == DeviceKind::Dvd {
+                    continue; // an empty drive
+                }
+                return Err(config(format!(
+                    "attachment {label} has no image `path`; virtax-vmm attaches image files only"
+                )));
+            };
+            let path = resolve(folder, path);
+            let file = std::fs::File::open(&path).map_err(|e| {
+                config(format!(
+                    "attachment {label}: image {} cannot be opened: {e}",
+                    path.display()
+                ))
+            })?;
+            if !file.metadata().map(|md| md.is_file()).unwrap_or(false) {
+                return Err(config(format!(
+                    "attachment {label}: {} is not a regular file",
+                    path.display()
+                )));
+            }
+            match virtax_vmm_core::disk::detect_format(&file) {
+                Ok(None) => {}
+                Ok(Some(format)) => {
+                    return Err(config(format!(
+                        "attachment {label}: {} is in {format} format; virtax-vmm attaches raw images \
+                         only (convert it with `qemu-img convert -O raw`)",
+                        path.display()
+                    )));
+                }
+                Err(e) => {
+                    return Err(config(format!(
+                        "attachment {label}: cannot read {}: {e}",
+                        path.display()
+                    )));
+                }
+            }
+            let writable = std::fs::OpenOptions::new().write(true).open(&path).is_ok();
+            let mode = if read_only || !writable { "ro" } else { "rw" };
+            args.extend(["--disk".into(), format!("{},{mode}", path.display())]);
+        }
+    }
+    Ok(args)
+}
+
 /// The `virtax-vmm` command line for a machine, or why it cannot run.
 fn vmm_args(m: &MachineManifest, folder: &Path) -> Result<Vec<String>, EngineError> {
     let boot = m.boot.as_ref().ok_or_else(|| {
@@ -138,6 +216,7 @@ fn vmm_args(m: &MachineManifest, folder: &Path) -> Result<Vec<String>, EngineErr
     if let Some(cmdline) = &boot.cmdline {
         args.extend(["--cmdline".into(), cmdline.clone()]);
     }
+    args.extend(disk_args(m, folder)?);
     Ok(args)
 }
 
@@ -507,6 +586,153 @@ mod tests {
         assert_eq!(args[1], dir.path().join("vmlinuz").to_string_lossy());
         assert!(args.windows(2).any(|w| w == ["--cmdline", "quiet"]));
         assert!(args.iter().any(|a| a.ends_with("logs/serial.log")));
+    }
+
+    fn attach(
+        m: &mut MachineManifest,
+        controller: &str,
+        bus: Bus,
+        attachments: &[(u8, DeviceKind, Option<&str>)],
+    ) {
+        m.storage.controllers.push(virtax_model::StorageController {
+            name: controller.into(),
+            bus,
+            attachments: attachments
+                .iter()
+                .map(|(port, kind, path)| virtax_model::Attachment {
+                    port: *port,
+                    device: 0,
+                    kind: *kind,
+                    medium: None,
+                    path: path.map(str::to_string),
+                    ssd: false,
+                    discard: false,
+                })
+                .collect(),
+        });
+    }
+
+    fn config_error(m: &MachineManifest, folder: &Path) -> String {
+        match disk_args(m, folder).unwrap_err() {
+            EngineError::Failed { code, message } => {
+                assert_eq!(code, "VTX-ENG-011", "{message}");
+                message
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn disks_follow_controller_then_port_order() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["a.img", "b.img", "c.img", "cd.iso"] {
+            std::fs::write(dir.path().join(name), [0u8; 1024]).unwrap();
+        }
+        let absolute = dir.path().join("c.img");
+        let mut m = MachineManifest::new("v", "Linux_64", EngineKind::VirtaxVmm);
+        attach(&mut m, "empty", Bus::Sata, &[]);
+        attach(
+            &mut m,
+            "vd0",
+            Bus::Virtio,
+            &[
+                (1, DeviceKind::Disk, Some("b.img")),
+                (0, DeviceKind::Disk, Some("a.img")),
+                (2, DeviceKind::Dvd, None),
+            ],
+        );
+        attach(
+            &mut m,
+            "vd1",
+            Bus::Virtio,
+            &[
+                (0, DeviceKind::Disk, Some(absolute.to_str().unwrap())),
+                (1, DeviceKind::Dvd, Some("cd.iso")),
+            ],
+        );
+        let at = |name: &str, mode: &str| format!("{},{mode}", dir.path().join(name).display());
+        assert_eq!(
+            disk_args(&m, dir.path()).unwrap(),
+            [
+                "--disk".to_string(),
+                at("a.img", "rw"),
+                "--disk".into(),
+                at("b.img", "rw"),
+                "--disk".into(),
+                at("c.img", "rw"),
+                "--disk".into(),
+                at("cd.iso", "ro"),
+            ],
+            "an empty SATA controller and an empty DVD drive are ignored"
+        );
+    }
+
+    #[test]
+    fn an_image_the_user_cannot_write_is_attached_read_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let image = dir.path().join("ro.img");
+        std::fs::write(&image, [0u8; 512]).unwrap();
+        std::fs::set_permissions(&image, std::fs::Permissions::from_mode(0o444)).unwrap();
+        let mut m = MachineManifest::new("v", "Linux_64", EngineKind::VirtaxVmm);
+        attach(
+            &mut m,
+            "vd0",
+            Bus::Virtio,
+            &[(0, DeviceKind::Disk, Some("ro.img"))],
+        );
+        let args = disk_args(&m, dir.path()).unwrap();
+        // Root can write any file, so only check the read-only case as a normal user.
+        if !rustix::process::geteuid().is_root() {
+            assert_eq!(args[1], format!("{},ro", image.display()));
+        }
+    }
+
+    #[test]
+    fn disks_that_cannot_be_attached_are_refused_before_start() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("disk.img"), [0u8; 512]).unwrap();
+        std::fs::write(
+            dir.path().join("disk.qcow2"),
+            [&b"QFI\xfb"[..], &[0; 508]].concat(),
+        )
+        .unwrap();
+        let manifest = |controller: &str, bus, kind, path: Option<&str>| {
+            let mut m = MachineManifest::new("v", "Linux_64", EngineKind::VirtaxVmm);
+            attach(&mut m, controller, bus, &[(0, kind, path)]);
+            m
+        };
+        for bus in [Bus::Sata, Bus::Ide, Bus::Scsi, Bus::Nvme] {
+            let m = manifest("ctl0", bus, DeviceKind::Disk, Some("disk.img"));
+            let e = config_error(&m, dir.path());
+            assert!(
+                e.contains("`ctl0`") && e.contains("`virtio` controllers only"),
+                "{e}"
+            );
+        }
+        let e = config_error(
+            &manifest("vd0", Bus::Virtio, DeviceKind::Disk, Some("missing.img")),
+            dir.path(),
+        );
+        assert!(
+            e.contains("missing.img") && e.contains("`vd0` port 0"),
+            "{e}"
+        );
+        let e = config_error(
+            &manifest("vd0", Bus::Virtio, DeviceKind::Disk, Some("disk.qcow2")),
+            dir.path(),
+        );
+        assert!(e.contains("qcow2 format"), "{e}");
+        let e = config_error(
+            &manifest("vd0", Bus::Virtio, DeviceKind::Disk, None),
+            dir.path(),
+        );
+        assert!(e.contains("no image `path`"), "{e}");
+        let e = config_error(
+            &manifest("vd0", Bus::Virtio, DeviceKind::Floppy, Some("disk.img")),
+            dir.path(),
+        );
+        assert!(e.contains("floppy"), "{e}");
     }
 
     #[tokio::test]

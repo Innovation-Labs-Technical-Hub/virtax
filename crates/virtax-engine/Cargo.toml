@@ -9,6 +9,7 @@ rust-version.workspace = true
 
 [dependencies]
 virtax-model.workspace = true
+virtax-vmm-core = { path = "../virtax-vmm-core" }
 async-trait.workspace = true
 rustix.workspace = true
 futures.workspace = true
