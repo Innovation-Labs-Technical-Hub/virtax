@@ -27,6 +27,54 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo xtask ci
 
+  supply-chain:
+    name: supply chain (deny, vet)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny@0.22.0,cargo-vet@0.10.3
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo xtask deny
+
+  spec:
+    name: openspec validate
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      # OpenSpec 2.1.1 needs Node.js >= 22.20.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo xtask spec
+
+  proto:
+    name: proto (buf lint, breaking)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: Swatinem/rust-cache@v2
+      # Pull requests are checked for breaking changes against their base; pushes to main lint only.
+      - if: github.event_name == 'pull_request'
+        run: cargo xtask proto "origin/${{ github.base_ref }}"
+      - if: github.event_name != 'pull_request'
+        run: cargo xtask proto
+
+  multiuser:
+    name: multi-user socket test
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo xtask multiuser-test
+
   kvm:
     name: kvm boot tests
     runs-on: ubuntu-24.04

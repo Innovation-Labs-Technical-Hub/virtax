@@ -72,9 +72,7 @@ pub struct UpdateOutcome {
     pub field_results: Vec<pb::FieldResult>,
 }
 
-fn now() -> String {
-    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
-}
+use virtax_store::now_rfc3339 as now;
 
 fn api_apply_mode(m: ApplyMode) -> pb::ApplyMode {
     match m {

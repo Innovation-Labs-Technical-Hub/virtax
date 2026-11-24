@@ -1,0 +1,44 @@
+name: Security audit
+
+# Daily RustSec check of Cargo.lock (FR-CP12-011): a new advisory files an issue within 24 hours.
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit@0.23.0
+      - uses: Swatinem/rust-cache@v2
+      - id: audit
+        run: cargo xtask audit 2>&1 | tee audit.log
+        shell: bash
+      - name: File an issue unless one is already open
+        if: failure() && steps.audit.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          gh label create security-audit --color B60205 --description "cargo audit found an advisory" 2>/dev/null || true
+          open=$(gh issue list --label security-audit --state open --json number --jq 'length')
+          if [ "$open" -gt 0 ]; then
+            echo "an open security-audit issue already exists"
+            exit 0
+          fi
+          {
+            echo "The daily \`cargo xtask audit\` run failed: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            echo
+            echo '```'
+            tail -n 80 audit.log
+            echo '```'
+          } > body.md
+          gh issue create --title "cargo audit: new RustSec advisory" --label security-audit --body-file body.md

@@ -114,7 +114,7 @@ pub fn read_manifest(folder: &Path) -> Result<ReadOutcome, StoreError> {
     })?;
 
     let corrupt_copy = if current.exists() {
-        let ts = chrono::Utc::now().format("%Y%m%dT%H%M%S%.3fZ");
+        let ts = jiff::Timestamp::now().strftime("%Y%m%dT%H%M%S%.3fZ");
         let dest = folder.join(format!("{MANIFEST}.corrupt-{ts}"));
         fs::rename(&current, &dest)?;
         Some(dest)

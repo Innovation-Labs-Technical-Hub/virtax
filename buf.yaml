@@ -1,0 +1,19 @@
+# Protobuf lint and breaking-change policy for virtax.v1 (FR-CP01-003, FR-CP01-010). Run with `cargo xtask proto`.
+version: v2
+modules:
+  - path: crates/virtax-api/proto
+lint:
+  use:
+    - STANDARD
+  except:
+    # The API is resource-oriented (AIP style, FR-CP01-003): Get/Create/Update return the resource itself and
+    # long-running RPCs share `Operation`, so request/response types are deliberately reused.
+    # Request types are named after the method and resource (`WatchEventsRequest` for `Events.Watch`).
+    - RPC_REQUEST_RESPONSE_UNIQUE
+    - RPC_REQUEST_STANDARD_NAME
+    - RPC_RESPONSE_STANDARD_NAME
+    # Service names are part of every gRPC path; adding a "Service" suffix now would break v1 clients.
+    - SERVICE_SUFFIX
+breaking:
+  use:
+    - FILE

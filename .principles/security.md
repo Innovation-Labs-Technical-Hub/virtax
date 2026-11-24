@@ -37,11 +37,11 @@ Scope: the whole repository — daemon, CLI, VMM, build and release, CI and cont
 
 | Rule | Check |
 |---|---|
-| 1 | Socket-mode code in `apps/virtaxd/src/main.rs`; `check_peer` on every service; e2e tests run against the 0600 socket. Not yet enforced: a test with a second OS user |
+| 1 | Socket-mode code in `apps/virtaxd/src/main.rs`; `check_peer` on every service; e2e tests run against the 0600 socket; `cargo xtask multiuser-test` (CI job `multi-user socket test`) proves a second OS user is refused by both the socket permissions and the peer check (`VTX-API-403`) |
 | 4 | `xtask/src/guest.rs` refuses a kernel package whose checksum differs |
 | 9 | `etag_conflict_and_name_uniqueness`, `second_holder_is_refused_until_release`, `second_daemon_is_refused`, `stale_or_future_cursor_requires_resync` |
 | 2, 3, 5, 6, 8 | Code review |
-| 7 | Not yet enforced: `cargo-deny` (licences and advisories), `cargo-audit` and an SBOM per release (NFR-00-13, FR-PL01-004) |
+| 7 | `cargo xtask deny` (`deny.toml`: licences, advisories, bans, crates.io only; then `cargo vet` against `supply-chain/`) in CI job `supply chain (deny, vet)`; daily `cargo xtask audit` files an issue on a new advisory (`.github/workflows/audit.yml`). Not yet enforced: an SBOM per release (FR-PL01-004) |
 
 ## Anti-patterns
 

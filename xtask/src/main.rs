@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
 mod guest;
+mod multiuser;
 
 const USAGE: &str = "usage: cargo xtask <command>
 
@@ -12,7 +13,18 @@ commands:
   e2e [filter]   run the virtaxctl end-to-end tests (optionally filter by test name)
   guest-kernel   fetch the pinned test kernel and build the busybox initramfs (.cache/guest)
   kvm-test       run the tests that boot real guests on KVM (needs /dev/kvm and guest-kernel)
-  schema         write the machine.toml JSON Schema to schemas/virtax.machine.v1.json";
+  schema         write the machine.toml JSON Schema to schemas/virtax.machine.v1.json
+  deny           supply-chain gate: cargo-deny (licences, bans, sources, advisories) and cargo-vet
+  audit          cargo-audit against the RustSec database (run daily in CI)
+  spec           OpenSpec strict validation of openspec/
+  proto [ref]    buf lint for virtax.v1; with a git ref, also buf breaking against it (e.g. origin/main)
+  multiuser-test prove another OS user cannot use the daemon (Linux, needs passwordless sudo)";
+
+/// Pinned versions of the tools xtask runs through npx.
+const OPENSPEC: &str = "@fission-ai/openspec@2.1.1";
+const BUF: &str = "@bufbuild/buf@1.75.0";
+/// Root of the protobuf module, as buf sees it (see buf.yaml).
+const PROTO_ROOT: &str = "crates/virtax-api/proto";
 
 fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -124,6 +136,54 @@ fn kvm_test() -> Result<(), String> {
     cargo(&["test", "--workspace", "--locked", "--", "--ignored", "kvm_"])
 }
 
+/// Run an external tool from the workspace root; a missing tool is reported with how to get it.
+fn tool(program: &str, args: &[&str], install_hint: &str) -> Result<(), String> {
+    eprintln!("$ {program} {}", args.join(" "));
+    let status = Command::new(program)
+        .args(args)
+        .current_dir(root())
+        .status()
+        .map_err(|e| format!("{program}: {e} ({install_hint})"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("`{program} {}` failed", args.join(" ")))
+    }
+}
+
+fn deny() -> Result<(), String> {
+    cargo(&["deny", "--log-level", "error", "check"])?;
+    cargo(&["vet", "--locked"])
+}
+
+fn spec() -> Result<(), String> {
+    tool(
+        "npx",
+        &[
+            "--yes",
+            OPENSPEC,
+            "validate",
+            "--all",
+            "--strict",
+            "--no-interactive",
+        ],
+        "install Node.js",
+    )
+}
+
+fn proto(against: Option<&str>) -> Result<(), String> {
+    tool("npx", &["--yes", BUF, "lint"], "install Node.js")?;
+    if let Some(git_ref) = against {
+        let input = format!(".git#ref={git_ref},subdir={PROTO_ROOT}");
+        tool(
+            "npx",
+            &["--yes", BUF, "breaking", "--against", &input],
+            "install Node.js",
+        )?;
+    }
+    Ok(())
+}
+
 fn schema() -> Result<(), String> {
     let out = root().join("schemas");
     std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
@@ -158,6 +218,11 @@ fn main() -> ExitCode {
         Some("schema") => schema(),
         Some("guest-kernel") => guest::fetch(&root()),
         Some("kvm-test") => kvm_test(),
+        Some("deny") => deny(),
+        Some("audit") => cargo(&["audit"]),
+        Some("spec") => spec(),
+        Some("proto") => proto(args.get(1).map(String::as_str)),
+        Some("multiuser-test") => multiuser::run_test(&root()),
         _ => {
             eprintln!("{USAGE}");
             return ExitCode::from(2);

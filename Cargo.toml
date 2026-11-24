@@ -6,6 +6,8 @@ members = ["crates/*", "apps/*", "xtask"]
 version = "0.1.0"
 edition = "2024"
 license = "GPL-3.0-or-later"
+# Nothing here is published to crates.io; crates are consumed inside this workspace.
+publish = false
 rust-version = "1.89"
 repository = "https://github.com/innovation-labs/virtax"
 
@@ -17,10 +19,10 @@ virtax-api = { path = "crates/virtax-api" }
 
 anyhow = "1"
 async-trait = "0.1"
-chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 clap = { version = "4.6", features = ["derive", "env"] }
 dirs = "7"
 futures = "0.3"
+jiff = "1"
 hyper-util = { version = "0.1", features = ["tokio"] }
 prost = "0.14"
 prost-types = "0.14"

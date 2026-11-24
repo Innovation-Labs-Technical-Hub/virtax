@@ -7,7 +7,7 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 use uuid::Uuid;
 use virtax_model::{EngineKind, MachineManifest, MachineSummary, VtxCode, VtxError};
 
-use crate::{StoreError, now};
+use crate::{StoreError, now_rfc3339 as now};
 
 /// Ordered schema migrations; version N is `MIGRATIONS[N - 1]`. Never edit a released entry.
 const MIGRATIONS: &[&str] = &[r#"
@@ -552,9 +552,12 @@ impl Registry {
         max_age: std::time::Duration,
     ) -> Result<usize, StoreError> {
         let (_, last) = self.event_bounds()?;
-        let cutoff = chrono::Utc::now()
-            - chrono::Duration::from_std(max_age).unwrap_or(chrono::Duration::MAX);
-        let cutoff = cutoff.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let now = jiff::Timestamp::now();
+        let cutoff = jiff::SignedDuration::try_from(max_age)
+            .ok()
+            .and_then(|age| now.checked_sub(age).ok())
+            .unwrap_or(jiff::Timestamp::MIN);
+        let cutoff = crate::rfc3339(cutoff);
         Ok(self.conn.execute(
             "DELETE FROM event_journal WHERE seq <= ?1 OR ts < ?2",
             params![last.saturating_sub(max_events) as i64, cutoff],

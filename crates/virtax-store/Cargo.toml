@@ -4,11 +4,12 @@ description = "Virtax registry (SQLite WAL) and machine.toml persistence"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish.workspace = true
 rust-version.workspace = true
 
 [dependencies]
 virtax-model.workspace = true
-chrono.workspace = true
+jiff.workspace = true
 dirs.workspace = true
 rusqlite.workspace = true
 serde.workspace = true

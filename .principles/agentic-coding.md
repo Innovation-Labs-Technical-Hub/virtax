@@ -46,7 +46,7 @@ people reviewing it.
 
 | Rule | Check |
 |---|---|
-| 1, 2 | `openspec validate --all --strict` (`just spec`); review of the change's proposal for cited IDs and decisions |
+| 1, 2 | `openspec validate --all --strict` (`cargo xtask spec`, CI job `openspec validate`); review of the change's proposal for cited IDs and decisions |
 | 3 | CI jobs `ci` and `kvm boot tests` on every pull request |
 | 4–11 | Review of the pull request, its commits and the agent's report |
 

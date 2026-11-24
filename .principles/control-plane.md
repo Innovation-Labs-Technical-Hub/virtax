@@ -52,7 +52,8 @@ Scope: `apps/virtaxd`, `apps/virtaxctl`, `crates/virtax-api`, `crates/virtax-mod
 | 5 | `migrates_once_and_reopens`, `refuses_newer_registry` |
 | 6, 9, 10 | `apps/virtaxctl/tests/e2e.rs` (`machine_lifecycle_through_cli` checks exit codes, the returned etag and JSON-only stdout) |
 | 8 | `burst_beyond_buffer_loses_nothing`, `events_watch_survives_daemon_restart_without_loss_or_duplicates` |
-| 1, 2, 7, 11, 12 | Code review. Not yet enforced: `buf breaking` against the previous release (FR-CP01-010) |
+| 1 | `cargo xtask proto origin/<base>` (`buf lint` and `buf breaking`) in CI job `proto (buf lint, breaking)` on every pull request |
+| 2, 7, 11, 12 | Code review |
 
 ## Anti-patterns
 

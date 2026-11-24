@@ -4,6 +4,7 @@ description = "Virtax per-user control-plane daemon"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish.workspace = true
 rust-version.workspace = true
 
 [dependencies]
@@ -12,7 +13,6 @@ virtax-engine.workspace = true
 virtax-model.workspace = true
 virtax-store.workspace = true
 anyhow.workspace = true
-chrono.workspace = true
 clap.workspace = true
 futures.workspace = true
 prost-types.workspace = true
