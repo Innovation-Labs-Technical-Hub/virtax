@@ -20,17 +20,17 @@
 - [x] 3.3 Lock images (exclusive for read-write, shared for read-only) for the process lifetime; verify with a test that a second open of a read-write image fails and succeeds after the first is dropped
 - [x] 3.4 Add `virtax-vmm --disk <path>[,ro]` (repeatable); verify `virtax-vmm --help` documents it and an invalid value exits 1 with a clear message
 - [x] 3.5 Extend the test guest's `/init` with a `virtax.disktest` mode that writes a known pattern to `/dev/vda`, flushes and powers off, and add `kvm_` tests for: pattern persisted in the host file, read-only disk refusing writes, two disks in order, a qcow2 image refused before boot, and a locked image refused; verify with `cargo xtask kvm-test`
-- [ ] 3.6 Document disks, the `--disk` flag and the locking behaviour in `docs/virtax-vmm.md`; verify the documented command boots the test guest with a disk
+- [x] 3.6 Document disks, the `--disk` flag and the locking behaviour in `docs/virtax-vmm.md`; verify the documented command boots the test guest with a disk
 
 ## 4. Engine integration
 
-- [ ] 4.1 Build `--disk` arguments from the manifest's `virtio` controllers in `VirtaxVmmEngine`, and refuse other buses, missing files and non-raw images with `VTX-ENG-011`; verify with engine unit tests for each refusal and for attachment order
-- [ ] 4.2 Add a `kvm_` end-to-end test that creates a machine through `virtaxctl`, adds a raw disk to its `machine.toml`, starts it in disk-test mode and checks the host file afterwards; verify with `cargo xtask kvm-test`
+- [x] 4.1 Build `--disk` arguments from the manifest's `virtio` controllers in `VirtaxVmmEngine`, and refuse other buses, missing files and non-raw images with `VTX-ENG-011`; verify with engine unit tests for each refusal and for attachment order
+- [x] 4.2 Add a `kvm_` end-to-end test that creates a machine through `virtaxctl`, adds a raw disk to its `machine.toml`, starts it in disk-test mode and checks the host file afterwards; verify with `cargo xtask kvm-test`
 
 ## 5. Integration checks
 
 - [ ] 5.1 Run `cargo xtask ci` and `cargo xtask kvm-test`; verify both pass locally and in the CI jobs, including the KVM job
-- [ ] 5.2 Mark the implemented scenarios in the delta specs against their tests; verify `openspec validate add-virtio-blk-pci --strict` passes
+- [x] 5.2 Mark the implemented scenarios in the delta specs against their tests; verify `openspec validate add-virtio-blk-pci --strict` passes
 
 ## Workflow follow-up
 
