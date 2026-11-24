@@ -39,6 +39,37 @@ struct Args {
     /// Exit when the guest reboots instead of restarting it.
     #[arg(long)]
     no_reboot: bool,
+    /// Attach a raw disk image as a virtio-blk device: `<path>` or `<path>,ro` for read-only.
+    /// Repeat for more disks; the guest sees them in this order (/dev/vda, /dev/vdb, ...). Each
+    /// image is locked while the VM runs: exclusively when read-write, shared when read-only.
+    #[arg(long = "disk", value_name = "PATH[,ro]", value_parser = parse_disk)]
+    disks: Vec<DiskArg>,
+}
+
+/// A `--disk` value, checked when the arguments are parsed.
+#[derive(Debug, Clone)]
+struct DiskArg {
+    path: PathBuf,
+    read_only: bool,
+}
+
+fn parse_disk(value: &str) -> Result<DiskArg, String> {
+    let (path, read_only) = match value.rsplit_once(',') {
+        Some((path, "ro")) => (path, true),
+        Some((_, option)) => {
+            return Err(format!(
+                "unknown option `{option}` (expected `<path>` or `<path>,ro`)"
+            ));
+        }
+        None => (value, false),
+    };
+    if path.is_empty() {
+        return Err("missing image path".into());
+    }
+    Ok(DiskArg {
+        path: PathBuf::from(path),
+        read_only,
+    })
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -69,6 +100,14 @@ fn run(args: Args) -> ExitCode {
         kernel: args.kernel,
         initrd: args.initrd,
         extra_cmdline: args.cmdline,
+        disks: args
+            .disks
+            .into_iter()
+            .map(|d| virtax_vmm_core::disk::DiskConfig {
+                path: d.path,
+                read_only: d.read_only,
+            })
+            .collect(),
     };
     let no_reboot = args.no_reboot;
     let ready = |control: virtax_vmm_core::VmControl| {
@@ -146,5 +185,31 @@ fn main() -> ExitCode {
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
         .init();
-    run(Args::parse())
+    match Args::try_parse() {
+        Ok(args) => run(args),
+        Err(e) => {
+            let _ = e.print();
+            // --help and --version are not errors; a bad argument is a configuration error (1).
+            ExitCode::from(if e.use_stderr() { 1 } else { 0 })
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_disk_arguments() {
+        let d = parse_disk("a.img").unwrap();
+        assert_eq!((d.path, d.read_only), (PathBuf::from("a.img"), false));
+        let d = parse_disk("/x/b,c.img,ro").unwrap();
+        assert_eq!((d.path, d.read_only), (PathBuf::from("/x/b,c.img"), true));
+        assert!(
+            parse_disk("a.img,rw")
+                .unwrap_err()
+                .contains("unknown option")
+        );
+        assert!(parse_disk(",ro").is_err());
+    }
 }

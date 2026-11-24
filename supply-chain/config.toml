@@ -597,6 +597,14 @@ criteria = "safe-to-deploy"
 version = "0.1.1"
 criteria = "safe-to-deploy"
 
+[[exemptions.virtio-bindings]]
+version = "0.2.7"
+criteria = "safe-to-deploy"
+
+[[exemptions.virtio-queue]]
+version = "0.18.0"
+criteria = "safe-to-deploy"
+
 [[exemptions.vm-memory]]
 version = "0.18.0"
 criteria = "safe-to-deploy"

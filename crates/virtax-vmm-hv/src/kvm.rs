@@ -5,11 +5,17 @@ use std::path::Path;
 /// Register and CPUID types the boot code fills in.
 pub use kvm_bindings;
 
+use std::collections::BTreeMap;
+use std::sync::Mutex;
+
 use kvm_bindings::{
-    CpuId, KVM_MAX_CPUID_ENTRIES, KVM_PIT_SPEAKER_DUMMY, Msrs, kvm_fpu, kvm_lapic_state,
-    kvm_msr_entry, kvm_pit_config, kvm_regs, kvm_sregs, kvm_userspace_memory_region,
+    CpuId, KVM_IRQ_ROUTING_IRQCHIP, KVM_IRQ_ROUTING_MSI, KVM_IRQCHIP_IOAPIC,
+    KVM_IRQCHIP_PIC_MASTER, KVM_IRQCHIP_PIC_SLAVE, KVM_MAX_CPUID_ENTRIES, KVM_PIT_SPEAKER_DUMMY,
+    KvmIrqRouting, Msrs, kvm_fpu, kvm_irq_routing_entry, kvm_irq_routing_irqchip,
+    kvm_irq_routing_msi, kvm_lapic_state, kvm_msr_entry, kvm_pit_config, kvm_regs, kvm_sregs,
+    kvm_userspace_memory_region,
 };
-use kvm_ioctls::{Kvm, VcpuExit, VcpuFd, VmFd};
+use kvm_ioctls::{IoEventAddress, Kvm, NoDatamatch, VcpuExit, VcpuFd, VmFd};
 use vm_memory::{GuestMemoryBackend, GuestMemoryMmap, GuestMemoryRegion};
 use vmm_sys_util::eventfd::EventFd;
 
@@ -76,9 +82,15 @@ pub enum Exit<'a> {
     Other(String),
 }
 
+/// Interrupt pins of the in-kernel I/O APIC; MSI routes use the GSIs above them.
+pub const IOAPIC_PINS: u32 = 24;
+
 pub struct Vm {
     kvm: Kvm,
     fd: VmFd,
+    /// MSI routes by GSI. KVM replaces the whole routing table on every update, so the VMM keeps
+    /// the full set and re-sends it together with the default interrupt-controller routes.
+    msi_routes: Mutex<BTreeMap<u32, (u64, u32)>>,
 }
 
 impl Vm {
@@ -112,7 +124,41 @@ impl Vm {
             ..Default::default()
         };
         fd.create_pit2(pit).map_err(kvm_err("KVM_CREATE_PIT2"))?;
-        Ok(Self { kvm, fd })
+        Ok(Self {
+            kvm,
+            fd,
+            msi_routes: Mutex::new(BTreeMap::new()),
+        })
+    }
+
+    /// Route `gsi` to the MSI message `(address, data)`, so that writing an irqfd registered on
+    /// `gsi` delivers that message. `gsi` must be at or above [`IOAPIC_PINS`].
+    pub fn set_msi_route(&self, gsi: u32, address: u64, data: u32) -> Result<()> {
+        assert!(gsi >= IOAPIC_PINS, "GSI {gsi} belongs to the I/O APIC");
+        let mut routes = self.msi_routes.lock().unwrap();
+        routes.insert(gsi, (address, data));
+        let routing =
+            KvmIrqRouting::from_entries(&routing_entries(&routes)).map_err(|_| HvError::Kvm {
+                what: "too many interrupt routes",
+                source: kvm_ioctls::Error::new(libc_e2big()),
+            })?;
+        self.fd
+            .set_gsi_routing(&routing)
+            .map_err(kvm_err("KVM_SET_GSI_ROUTING"))
+    }
+
+    /// Signal `event` instead of exiting to the VMM when the guest writes to the MMIO address `addr`.
+    pub fn register_mmio_ioevent(&self, event: &EventFd, addr: u64) -> Result<()> {
+        self.fd
+            .register_ioevent(event, &IoEventAddress::Mmio(addr), NoDatamatch)
+            .map_err(kvm_err("KVM_IOEVENTFD"))
+    }
+
+    /// Undo [`Vm::register_mmio_ioevent`].
+    pub fn unregister_mmio_ioevent(&self, event: &EventFd, addr: u64) -> Result<()> {
+        self.fd
+            .unregister_ioevent(event, &IoEventAddress::Mmio(addr), NoDatamatch)
+            .map_err(kvm_err("KVM_IOEVENTFD deassign"))
     }
 
     /// Deliver interrupt `gsi` to the guest whenever `event` is written.
@@ -209,6 +255,47 @@ impl Vcpu {
     }
 }
 
+/// The routing table KVM installs with the in-kernel irqchip (GSIs 0-15 on the PICs except the
+/// cascade, 0-23 on the I/O APIC), followed by the MSI routes.
+fn routing_entries(msi: &BTreeMap<u32, (u64, u32)>) -> Vec<kvm_irq_routing_entry> {
+    let irqchip = |gsi: u32, chip: u32, pin: u32| {
+        let mut e = kvm_irq_routing_entry {
+            gsi,
+            type_: KVM_IRQ_ROUTING_IRQCHIP,
+            ..Default::default()
+        };
+        e.u.irqchip = kvm_irq_routing_irqchip { irqchip: chip, pin };
+        e
+    };
+    let mut entries = Vec::new();
+    for gsi in 0..IOAPIC_PINS {
+        if gsi < 16 && gsi != 2 {
+            let (chip, pin) = if gsi < 8 {
+                (KVM_IRQCHIP_PIC_MASTER, gsi)
+            } else {
+                (KVM_IRQCHIP_PIC_SLAVE, gsi - 8)
+            };
+            entries.push(irqchip(gsi, chip, pin));
+        }
+        entries.push(irqchip(gsi, KVM_IRQCHIP_IOAPIC, gsi));
+    }
+    for (&gsi, &(address, data)) in msi {
+        let mut e = kvm_irq_routing_entry {
+            gsi,
+            type_: KVM_IRQ_ROUTING_MSI,
+            ..Default::default()
+        };
+        e.u.msi = kvm_irq_routing_msi {
+            address_lo: address as u32,
+            address_hi: (address >> 32) as u32,
+            data,
+            ..Default::default()
+        };
+        entries.push(e);
+    }
+    entries
+}
+
 // errno values (Linux, all architectures virtax-vmm supports).
 const fn libc_eintr() -> i32 {
     4
@@ -221,4 +308,28 @@ const fn libc_e2big() -> i32 {
 }
 const fn libc_einval() -> i32 {
     22
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn routing_keeps_the_default_irqchip_routes() {
+        let mut msi = BTreeMap::new();
+        msi.insert(24, (0xfee0_0000, 0x4041));
+        let entries = routing_entries(&msi);
+        // 15 PIC routes (16 pins minus the cascade) + 24 I/O APIC routes + 1 MSI route.
+        assert_eq!(entries.len(), 15 + 24 + 1);
+        let com1: Vec<_> = entries.iter().filter(|e| e.gsi == 4).collect();
+        assert_eq!(com1.len(), 2, "GSI 4 reaches both the PIC and the I/O APIC");
+        let last = entries.last().unwrap();
+        assert_eq!((last.gsi, last.type_), (24, KVM_IRQ_ROUTING_MSI));
+        // SAFETY: the entry was built with its `msi` variant just above.
+        let m = unsafe { last.u.msi };
+        assert_eq!(
+            (m.address_lo, m.address_hi, m.data),
+            (0xfee0_0000, 0, 0x4041)
+        );
+    }
 }

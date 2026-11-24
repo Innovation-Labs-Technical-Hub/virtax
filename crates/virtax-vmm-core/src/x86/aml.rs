@@ -147,6 +147,46 @@ pub fn edge_interrupt_resources(gsi: u32) -> Vec<u8> {
     resource_buffer(d)
 }
 
+/// `ResourceTemplate () { descriptors }` from descriptors built by the `*_descriptor` helpers.
+pub fn resource_template(descriptors: &[Vec<u8>]) -> Vec<u8> {
+    resource_buffer(descriptors.concat())
+}
+
+/// `WordBusNumber (ResourceProducer, MinFixed, MaxFixed, PosDecode, 0, first, last, 0, count)`.
+pub fn bus_number_descriptor(first: u16, last: u16) -> Vec<u8> {
+    // Word address space descriptor: type 2 (bus numbers), producer with fixed min and max.
+    let mut d = vec![0x88];
+    d.extend(13u16.to_le_bytes());
+    d.extend([0x02, 0x0c, 0x00]);
+    for v in [0, first, last, 0, last - first + 1] {
+        d.extend(v.to_le_bytes());
+    }
+    d
+}
+
+/// `DWordMemory (ResourceProducer, PosDecode, MinFixed, MaxFixed, NonCacheable, ReadWrite, 0, base,
+/// base + len - 1, 0, len)`: a memory window a bridge forwards.
+pub fn memory_window_descriptor(base: u32, len: u32) -> Vec<u8> {
+    // DWord address space descriptor: type 0 (memory), producer with fixed min and max, read-write.
+    let mut d = vec![0x87];
+    d.extend(23u16.to_le_bytes());
+    d.extend([0x00, 0x0c, 0x01]);
+    for v in [0, base, base + (len - 1), 0, len] {
+        d.extend(v.to_le_bytes());
+    }
+    d
+}
+
+/// `Memory32Fixed (ReadWrite, base, len)`.
+pub fn memory32_fixed_descriptor(base: u32, len: u32) -> Vec<u8> {
+    let mut d = vec![0x86];
+    d.extend(9u16.to_le_bytes());
+    d.push(0x01);
+    d.extend(base.to_le_bytes());
+    d.extend(len.to_le_bytes());
+    d
+}
+
 /// `Method (NAME, args) { body }`, not serialized.
 pub fn method(n: &str, args: u8, body: Vec<u8>) -> Vec<u8> {
     assert!(args <= 7, "AML methods take at most 7 arguments");
@@ -214,6 +254,29 @@ mod tests {
             &io_resources(0x70, 2)[4..12],
             &[0x47, 0x01, 0x70, 0x00, 0x70, 0x00, 0x01, 0x02]
         );
+    }
+
+    #[test]
+    fn pci_host_bridge_resources() {
+        // Byte layouts from ACPI 6.5 §6.4.3.5.2 (DWord), §6.4.3.5.3 (Word) and §6.4.3.4 (Memory32Fixed).
+        assert_eq!(
+            bus_number_descriptor(0, 0),
+            [0x88, 13, 0, 2, 0x0c, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0]
+        );
+        let mem = memory_window_descriptor(0xc000_0000, 0x1000_0000);
+        assert_eq!(&mem[..6], &[0x87, 23, 0, 0, 0x0c, 1]);
+        assert_eq!(&mem[10..14], &0xc000_0000u32.to_le_bytes(), "minimum");
+        assert_eq!(&mem[14..18], &0xcfff_ffffu32.to_le_bytes(), "maximum");
+        assert_eq!(&mem[22..26], &0x1000_0000u32.to_le_bytes(), "length");
+        assert_eq!(mem.len(), 26);
+        assert_eq!(
+            memory32_fixed_descriptor(0xfeb0_0000, 0x10_0000),
+            [0x86, 9, 0, 1, 0, 0, 0xb0, 0xfe, 0, 0, 0x10, 0]
+        );
+        let t = resource_template(&[bus_number_descriptor(0, 0), mem]);
+        // BufferOp, PkgLength, BufferSize = 16 + 26 + 2 (end tag).
+        assert_eq!(&t[..4], &[0x11, 0x2f, 0x0a, 44]);
+        assert_eq!(&t[t.len() - 2..], &[0x79, 0]);
     }
 
     #[test]

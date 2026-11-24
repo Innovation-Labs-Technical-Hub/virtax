@@ -11,9 +11,13 @@ use linux_loader::loader::elf::Elf;
 use linux_loader::loader::{KernelLoader, load_cmdline};
 use vm_memory::{Bytes, GuestAddress, GuestMemoryMmap};
 
-use crate::layout::{CMDLINE_ADDR, EBDA_START, HIMEM_START, MMIO_GAP_END, ZERO_PAGE, low_ram_end};
+use crate::layout::{
+    CMDLINE_ADDR, EBDA_START, HIMEM_START, MMIO_GAP_END, PCI_ECAM_BASE, PCI_ECAM_SIZE, ZERO_PAGE,
+    low_ram_end,
+};
 
 const E820_RAM: u32 = 1;
+const E820_RESERVED: u32 = 2;
 const KERNEL_BOOT_FLAG_MAGIC: u16 = 0xaa55;
 const KERNEL_HDR_MAGIC: u32 = 0x5372_6448; // "HdrS"
 const KERNEL_LOADER_OTHER: u8 = 0xff;
@@ -147,6 +151,12 @@ pub fn e820_map(memory_mib: u64) -> Vec<boot_e820_entry> {
     let total = memory_mib * crate::layout::MIB;
     let low_end = low_ram_end(memory_mib);
     let mut map = vec![ram(0, EBDA_START), ram(HIMEM_START, low_end)];
+    // Linux uses ECAM early only when the e820 map reserves it.
+    map.push(boot_e820_entry {
+        addr: PCI_ECAM_BASE,
+        size: PCI_ECAM_SIZE,
+        r#type: E820_RESERVED,
+    });
     if total > low_end {
         map.push(ram(MMIO_GAP_END, MMIO_GAP_END + (total - low_end)));
     }
@@ -162,11 +172,17 @@ mod tests {
         let small: Vec<_> = e820_map(256).iter().map(|e| (e.addr, e.size)).collect();
         assert_eq!(
             small,
-            vec![(0, EBDA_START), (HIMEM_START, (256 << 20) - HIMEM_START)]
+            vec![
+                (0, EBDA_START),
+                (HIMEM_START, (256 << 20) - HIMEM_START),
+                (PCI_ECAM_BASE, PCI_ECAM_SIZE)
+            ]
         );
+        let reserved = e820_map(256)[2].r#type;
+        assert_eq!(reserved, E820_RESERVED, "ECAM is reserved");
         let big = e820_map(5120);
-        assert_eq!(big.len(), 3);
-        assert_eq!((big[2].addr, big[2].size), (MMIO_GAP_END, 2 << 30));
+        assert_eq!(big.len(), 4);
+        assert_eq!((big[3].addr, big[3].size), (MMIO_GAP_END, 2 << 30));
     }
 
     #[test]

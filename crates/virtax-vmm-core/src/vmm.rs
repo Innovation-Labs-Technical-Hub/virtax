@@ -3,20 +3,25 @@
 use std::io::Write;
 use std::path::PathBuf;
 
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 
-use virtax_vmm_hv::kvm::{Exit, HvError, Vcpu, Vm};
+use virtax_vmm_hv::kvm::{Exit, HvError, IOAPIC_PINS, Vcpu, Vm};
 use vmm_sys_util::eventfd::EventFd;
 
 use crate::devices::{COM1_IRQ, PioAction, PioBus};
+use crate::disk::{DiskConfig, DiskImage};
 use crate::layout::{MIN_MEMORY_MIB, guest_memory};
+use crate::pci::{PciBus, Platform};
+use crate::virtio::VirtioPci;
+use crate::virtio::block::Block;
 use crate::x86::{acpi, boot, cpu};
 
 /// Kernel parameters virtax-vmm needs: serial console, keyboard-controller reboot (which virtax-vmm turns into
-/// a VM exit), no PCI scan, and fast exit on panic. ACPI tells the kernel there is no PS/2
-/// controller, VGA or CMOS clock to probe.
-pub const DEFAULT_CMDLINE: &str = "console=ttyS0 reboot=k panic=1 pci=off";
+/// a VM exit), and fast exit on panic. ACPI tells the kernel there is no PS/2 controller or VGA to
+/// probe, and where the PCI host bridge is.
+pub const DEFAULT_CMDLINE: &str = "console=ttyS0 reboot=k panic=1";
 
 #[derive(Debug, Clone)]
 pub struct VmConfig {
@@ -26,6 +31,8 @@ pub struct VmConfig {
     pub initrd: Option<PathBuf>,
     /// Appended to `DEFAULT_CMDLINE`.
     pub extra_cmdline: String,
+    /// Raw images attached as virtio-blk devices, in this order.
+    pub disks: Vec<DiskConfig>,
 }
 
 impl VmConfig {
@@ -76,8 +83,38 @@ pub enum VmmError {
     Io(#[from] std::io::Error),
 }
 
+/// [`Platform`] on KVM: MSI routes, irqfds and ioeventfds of the VM, GSIs above the I/O APIC pins.
+struct KvmPlatform {
+    vm: Arc<Vm>,
+    next_gsi: AtomicU32,
+}
+
+fn io_error(e: HvError) -> std::io::Error {
+    std::io::Error::other(e.to_string())
+}
+
+impl Platform for KvmPlatform {
+    fn allocate_gsi(&self) -> u32 {
+        self.next_gsi.fetch_add(1, Ordering::Relaxed)
+    }
+    fn register_irqfd(&self, event: &EventFd, gsi: u32) -> std::io::Result<()> {
+        self.vm.register_irqfd(event, gsi).map_err(io_error)
+    }
+    fn set_msi_route(&self, gsi: u32, address: u64, data: u32) -> std::io::Result<()> {
+        self.vm.set_msi_route(gsi, address, data).map_err(io_error)
+    }
+    fn register_mmio_ioevent(&self, event: &EventFd, addr: u64) -> std::io::Result<()> {
+        self.vm.register_mmio_ioevent(event, addr).map_err(io_error)
+    }
+    fn unregister_mmio_ioevent(&self, event: &EventFd, addr: u64) -> std::io::Result<()> {
+        self.vm
+            .unregister_mmio_ioevent(event, addr)
+            .map_err(io_error)
+    }
+}
+
 /// Run one vCPU until the guest stops the VM or the vCPU fails.
-fn vcpu_loop(mut vcpu: Vcpu, bus: &Mutex<PioBus>) -> Result<VmExit, VmmError> {
+fn vcpu_loop(mut vcpu: Vcpu, bus: &Mutex<PioBus>, pci: &Mutex<PciBus>) -> Result<VmExit, VmmError> {
     loop {
         match vcpu.run()? {
             Exit::IoIn { port, data } => bus.lock().unwrap().read(port, data),
@@ -86,9 +123,16 @@ fn vcpu_loop(mut vcpu: Vcpu, bus: &Mutex<PioBus>) -> Result<VmExit, VmmError> {
                 PioAction::Reset => return Ok(VmExit::Reset),
                 PioAction::PowerOff => return Ok(VmExit::PowerOff),
             },
-            // No MMIO devices yet: reads float high, writes are dropped.
-            Exit::MmioRead { data, .. } => data.fill(0xff),
-            Exit::MmioWrite { .. } | Exit::Interrupted => {}
+            // Addresses nothing decodes: reads float high, writes are dropped.
+            Exit::MmioRead { addr, data } => {
+                if !pci.lock().unwrap().mmio_read(addr, data) {
+                    data.fill(0xff);
+                }
+            }
+            Exit::MmioWrite { addr, data } => {
+                pci.lock().unwrap().mmio_write(addr, data);
+            }
+            Exit::Interrupted => {}
             Exit::Shutdown => return Ok(VmExit::TripleFault),
             Exit::Hlt => {
                 return Err(VmmError::Guest(
@@ -126,21 +170,48 @@ pub fn run(
         )));
     }
 
+    // Images are checked and locked before anything else, so a bad or busy image fails the start
+    // before the guest runs.
+    let images = config
+        .disks
+        .iter()
+        .map(DiskImage::open)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(VmmError::Config)?;
+
     // vCPU threads hold the memory alive for as long as they may run guest code.
     let memory = Arc::new(guest_memory(config.memory_mib).map_err(VmmError::Config)?);
     let cmdline = config.cmdline();
     let rsdp = acpi::write_tables(&memory, config.vcpus).map_err(VmmError::Boot)?;
-    let images = boot::BootImages {
+    let boot_images = boot::BootImages {
         kernel: &config.kernel,
         initrd: config.initrd.as_deref(),
         cmdline: &cmdline,
         memory_mib: config.memory_mib,
         acpi_rsdp: Some(rsdp),
     };
-    let entry = boot::load(&memory, &images).map_err(VmmError::Boot)?;
+    let entry = boot::load(&memory, &boot_images).map_err(VmmError::Boot)?;
     cpu::write_boot_tables(&memory).map_err(VmmError::Boot)?;
 
-    let vm = Vm::new(&memory)?;
+    let vm = Arc::new(Vm::new(&memory)?);
+    let platform: Arc<dyn Platform> = Arc::new(KvmPlatform {
+        vm: Arc::clone(&vm),
+        next_gsi: AtomicU32::new(IOAPIC_PINS),
+    });
+    let mut pci_bus = PciBus::new();
+    for image in images {
+        let serial = image
+            .path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let path = image.path.display().to_string();
+        let block = Block::new(image, &serial, Arc::clone(&memory))?;
+        let device = VirtioPci::new(Box::new(block), Arc::clone(&platform))?;
+        let slot = pci_bus.add(Box::new(device)).map_err(VmmError::Config)?;
+        tracing::info!(%path, slot, "virtio-blk attached");
+    }
+    let pci = Arc::new(Mutex::new(pci_bus));
     let serial_irq = EventFd::new(0)?;
     vm.register_irqfd(&serial_irq, COM1_IRQ)?;
     let power_button = EventFd::new(0)?;
@@ -164,11 +235,16 @@ pub fn run(
 
     let (stopped_tx, stopped_rx) = mpsc::channel();
     for (id, vcpu) in vcpus.into_iter().enumerate() {
-        let (bus, memory, stopped) = (Arc::clone(&bus), Arc::clone(&memory), stopped_tx.clone());
+        let (bus, pci, memory, stopped) = (
+            Arc::clone(&bus),
+            Arc::clone(&pci),
+            Arc::clone(&memory),
+            stopped_tx.clone(),
+        );
         thread::Builder::new()
             .name(format!("vcpu{id}"))
             .spawn(move || {
-                let result = vcpu_loop(vcpu, &bus);
+                let result = vcpu_loop(vcpu, &bus, &pci);
                 let _ = stopped.send(result);
                 // Keep guest memory mapped until the process exits.
                 drop(memory);
@@ -180,6 +256,7 @@ pub fn run(
         .map_err(|_| VmmError::Guest("every vCPU thread ended without a result".into()))?;
     bus.lock().unwrap().flush();
     // Closing the VM fd is safe while vCPU threads run: each open vCPU fd keeps the VM alive.
+    drop(platform);
     drop(vm);
     result
 }
