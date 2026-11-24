@@ -11,12 +11,15 @@ const KERNEL_PATH_IN_DEB: &str = "./boot/vmlinuz-7.0.0-42-generic";
 const BUSYBOX: &str = "/usr/bin/busybox";
 
 /// The test guest's `/init`: prints markers the KVM tests look for on the serial console, then
-/// reboots (which ends the VM) unless the kernel command line contains `oxvmm.hold`.
+/// reboots (which ends the VM). Kernel parameters change the ending: `oxvmm.hold` keeps it running,
+/// `oxvmm.poweroff` powers off through ACPI instead of rebooting.
 const INIT_SCRIPT: &str = "#!/bin/busybox sh
 /bin/busybox mount -t proc proc /proc
 /bin/busybox echo \"OXVMM-GUEST-OK $(/bin/busybox uname -r)\"
 /bin/busybox echo \"OXVMM-GUEST-CMDLINE $(/bin/busybox cat /proc/cmdline)\"
+/bin/busybox echo \"OXVMM-GUEST-CPUS $(/bin/busybox nproc)\"
 if /bin/busybox grep -q oxvmm.hold /proc/cmdline; then /bin/busybox sleep 3600; fi
+if /bin/busybox grep -q oxvmm.poweroff /proc/cmdline; then /bin/busybox poweroff -f; fi
 /bin/busybox reboot -f
 ";
 

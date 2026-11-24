@@ -64,6 +64,10 @@ fn run(args: Args) -> ExitCode {
         extra_cmdline: args.cmdline,
     };
     match oxvmm_core::run(&config, serial, || eprintln!("{READY_LINE}")) {
+        Ok(oxvmm_core::VmExit::PowerOff) => {
+            eprintln!("oxvmm: guest powered off; VM stopped");
+            ExitCode::SUCCESS
+        }
         Ok(oxvmm_core::VmExit::Reset) => {
             eprintln!("oxvmm: guest rebooted; VM stopped");
             ExitCode::SUCCESS

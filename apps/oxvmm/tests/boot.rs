@@ -56,11 +56,56 @@ fn kvm_boots_to_userspace_and_exits_on_guest_reboot() {
 }
 
 #[test]
-fn rejects_more_than_one_vcpu_before_touching_kvm() {
+#[ignore = "needs /dev/kvm and `cargo xtask guest-kernel`; run with `cargo xtask kvm-test`"]
+fn kvm_boots_four_vcpus_and_powers_off_through_acpi() {
+    let dir = tempfile::tempdir().unwrap();
+    let serial = dir.path().join("serial.log");
     let out = Command::new(env!("CARGO_BIN_EXE_oxvmm"))
-        .args(["--kernel", "/nonexistent", "--cpus", "2"])
+        .arg("--kernel")
+        .arg(guest_dir().join("vmlinuz"))
+        .arg("--initrd")
+        .arg(guest_dir().join("initramfs.cpio"))
+        .args([
+            "--memory-mib",
+            "512",
+            "--cpus",
+            "4",
+            "--cmdline",
+            "oxvmm.poweroff",
+            "--serial",
+        ])
+        .arg(&serial)
+        .output()
+        .expect("run oxvmm");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let log = std::fs::read_to_string(&serial).unwrap();
+    assert!(
+        out.status.success(),
+        "oxvmm failed: {}\n{stderr}\n{log}",
+        out.status
+    );
+    assert!(stderr.contains("guest powered off"), "{stderr}");
+    assert!(
+        log.contains("OXVMM-GUEST-CPUS 4"),
+        "guest did not see 4 CPUs:\n{log}"
+    );
+    assert!(
+        log.contains("reboot: Power down"),
+        "guest did not power down through ACPI:\n{log}"
+    );
+    // ACPI says there is no PS/2 controller, so Linux skips it instead of failing a probe.
+    assert!(
+        log.contains("No PS/2 controller found") && !log.contains("Can't read CTR"),
+        "the kernel probed for a PS/2 controller:\n{log}"
+    );
+}
+
+#[test]
+fn rejects_an_invalid_vcpu_count_before_touching_kvm() {
+    let out = Command::new(env!("CARGO_BIN_EXE_oxvmm"))
+        .args(["--kernel", "/nonexistent", "--cpus", "0"])
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&out.stderr).contains("single vCPU"));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("vCPUs are supported"));
 }

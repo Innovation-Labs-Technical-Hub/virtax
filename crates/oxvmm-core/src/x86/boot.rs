@@ -34,6 +34,8 @@ pub struct BootImages<'a> {
     pub initrd: Option<&'a Path>,
     pub cmdline: &'a str,
     pub memory_mib: u64,
+    /// Guest-physical address of the ACPI RSDP, if the VM has ACPI tables.
+    pub acpi_rsdp: Option<u64>,
 }
 
 fn open(path: &Path, what: &str) -> Result<File, String> {
@@ -112,6 +114,7 @@ pub fn load(mem: &GuestMemoryMmap, images: &BootImages<'_>) -> Result<BootEntry,
         hdr,
         ..Default::default()
     };
+    params.acpi_rsdp_addr = images.acpi_rsdp.unwrap_or(0);
     let e820 = e820_map(images.memory_mib);
     params.e820_entries = e820.len() as u8;
     params.e820_table[..e820.len()].copy_from_slice(&e820);
@@ -188,6 +191,7 @@ mod tests {
             initrd: None,
             cmdline: "console=ttyS0",
             memory_mib: 64,
+            acpi_rsdp: None,
         };
         let err = load(&mem, &images).unwrap_err();
         std::fs::remove_file(&dir).unwrap();

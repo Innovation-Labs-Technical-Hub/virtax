@@ -29,6 +29,8 @@ use crate::{
 /// The line `oxvmm` prints on stderr once the guest is about to run (see `apps/oxvmm`).
 const READY_LINE: &str = "oxvmm: guest running";
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
+/// Matches `oxvmm-core`'s ACPI MADT limit.
+const MAX_VCPUS: u32 = 254;
 
 struct Machine {
     manifest: MachineManifest,
@@ -83,11 +85,11 @@ fn vmm_args(m: &MachineManifest, folder: &Path) -> Result<Vec<String>, EngineErr
             "no kernel to boot: set one with `oxctl vm set <vm> --kernel <path>`",
         )
     })?;
-    if m.cpu.count != 1 {
+    if m.cpu.count > MAX_VCPUS {
         return Err(failed(
             OxeCode::ENG_VM_CONFIG,
             format!(
-                "oxvmm boots one vCPU for now; the machine has {} (`oxctl vm set <vm> --cpus 1`)",
+                "oxvmm supports up to {MAX_VCPUS} vCPUs; the machine has {}",
                 m.cpu.count
             ),
         ));
@@ -451,11 +453,9 @@ mod tests {
             initrd: None,
             cmdline: Some("quiet".into()),
         });
-        assert!(
-            vmm_args(&m, dir.path()).is_err(),
-            "default manifest has 2 vCPUs"
-        );
-        m.cpu.count = 1;
+        m.cpu.count = 300;
+        assert!(vmm_args(&m, dir.path()).is_err(), "too many vCPUs");
+        m.cpu.count = 2;
         let args = vmm_args(&m, dir.path()).unwrap();
         assert_eq!(args[1], dir.path().join("vmlinuz").to_string_lossy());
         assert!(args.windows(2).any(|w| w == ["--cmdline", "quiet"]));
@@ -470,7 +470,6 @@ mod tests {
         let engine = OxvmmEngine::new(PathBuf::from("/bin/false"));
         let mut m = MachineManifest::new("v", "Linux_64", EngineKind::Oxvmm);
         m.platform.arch = Arch::X86_64;
-        m.cpu.count = 1;
         m.boot = Some(oxbox_model::Boot {
             kernel: "vmlinuz".into(),
             initrd: None,

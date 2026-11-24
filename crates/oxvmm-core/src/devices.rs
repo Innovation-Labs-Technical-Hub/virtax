@@ -3,6 +3,8 @@
 use std::io::Write;
 
 use vm_superio::{Serial, Trigger};
+
+use crate::x86::acpi;
 use vmm_sys_util::eventfd::EventFd;
 
 pub const COM1_BASE: u16 = 0x3f8;
@@ -27,8 +29,10 @@ impl Trigger for IrqTrigger {
 #[derive(Debug, PartialEq, Eq)]
 pub enum PioAction {
     Continue,
-    /// The guest pulsed the reset line.
+    /// The guest asked to reboot (keyboard-controller reset or the ACPI reset register).
     Reset,
+    /// The guest entered ACPI S5 (soft-off).
+    PowerOff,
 }
 
 pub struct PioBus {
@@ -53,6 +57,8 @@ impl PioBus {
             (Some(offset), 1) => data[0] = self.serial.read(offset),
             // The i8042 status register: no data, input buffer empty.
             _ if port == I8042_COMMAND || port == I8042_DATA => data.fill(0),
+            // ACPI sleep status: never asleep.
+            _ if port == acpi::SLEEP_STATUS_PORT => data.fill(0),
             // Nothing decodes this port: the bus floats high.
             _ => data.fill(0xff),
         }
@@ -67,6 +73,15 @@ impl PioBus {
                 PioAction::Continue
             }
             (None, [I8042_CMD_RESET]) if port == I8042_COMMAND => PioAction::Reset,
+            (None, [acpi::RESET_VALUE]) if port == acpi::RESET_PORT => PioAction::Reset,
+            (None, [value]) if port == acpi::SLEEP_CONTROL_PORT => {
+                let slp_typ = (value >> acpi::SLP_TYP_SHIFT) & 0x7;
+                if value & acpi::SLP_EN != 0 && slp_typ == acpi::S5_SLP_TYP {
+                    PioAction::PowerOff
+                } else {
+                    PioAction::Continue
+                }
+            }
             _ => PioAction::Continue,
         }
     }
@@ -110,5 +125,18 @@ mod tests {
             PioAction::Reset
         );
         assert_eq!(bus.write(I8042_COMMAND, &[0x20]), PioAction::Continue);
+        // Linux writes SLP_TYP=5 | SLP_EN to power off; other sleep states are ignored.
+        assert_eq!(
+            bus.write(acpi::SLEEP_CONTROL_PORT, &[0x34]),
+            PioAction::PowerOff
+        );
+        assert_eq!(
+            bus.write(acpi::SLEEP_CONTROL_PORT, &[(3 << 2) | 0x20]),
+            PioAction::Continue
+        );
+        assert_eq!(
+            bus.write(acpi::RESET_PORT, &[acpi::RESET_VALUE]),
+            PioAction::Reset
+        );
     }
 }

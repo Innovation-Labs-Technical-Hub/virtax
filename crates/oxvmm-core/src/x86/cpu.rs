@@ -153,24 +153,33 @@ fn set_delivery_mode(regs: &mut [std::os::raw::c_char], offset: usize, mode: u32
     }
 }
 
-/// Put vCPU `vcpu` into 64-bit mode at `entry`, ready to run the kernel.
-pub fn setup_boot_vcpu(vcpu: &Vcpu, cpuid: CpuId, entry: BootEntry) -> Result<(), HvError> {
-    vcpu.set_cpuid(&guest_cpuid(cpuid, 0, 1))?;
+/// Configure vCPU `id` of `count`. The boot vCPU also gets 64-bit mode at `entry`; the others wait
+/// for the guest to start them with INIT/SIPI, which the in-kernel local APIC handles.
+pub fn setup_vcpu(
+    vcpu: &Vcpu,
+    cpuid: CpuId,
+    id: u8,
+    count: u8,
+    entry: Option<BootEntry>,
+) -> Result<(), HvError> {
+    vcpu.set_cpuid(&guest_cpuid(cpuid, id, count))?;
     vcpu.set_msrs(&boot_msrs())?;
-    vcpu.set_sregs(&long_mode_sregs(vcpu.sregs()?))?;
-    vcpu.set_regs(&kvm_regs {
-        rflags: 0x2,
-        rip: entry.rip,
-        rsp: BOOT_STACK,
-        rbp: BOOT_STACK,
-        rsi: entry.zero_page,
-        ..Default::default()
-    })?;
-    vcpu.set_fpu(&kvm_fpu {
-        fcw: 0x37f,
-        mxcsr: 0x1f80,
-        ..Default::default()
-    })?;
+    if let Some(entry) = entry {
+        vcpu.set_sregs(&long_mode_sregs(vcpu.sregs()?))?;
+        vcpu.set_regs(&kvm_regs {
+            rflags: 0x2,
+            rip: entry.rip,
+            rsp: BOOT_STACK,
+            rbp: BOOT_STACK,
+            rsi: entry.zero_page,
+            ..Default::default()
+        })?;
+        vcpu.set_fpu(&kvm_fpu {
+            fcw: 0x37f,
+            mxcsr: 0x1f80,
+            ..Default::default()
+        })?;
+    }
     // LINT0 receives legacy PIC interrupts, LINT1 NMIs.
     let mut lapic = vcpu.lapic()?;
     set_delivery_mode(&mut lapic.regs, APIC_LVT_LINT0, APIC_MODE_EXTINT);

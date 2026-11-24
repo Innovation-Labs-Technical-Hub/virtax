@@ -505,7 +505,7 @@ fn kvm_guest_boots_through_oxctl_and_powers_off() {
     let env = Env::without_mock();
     let (kernel, initrd) = (guest_file("vmlinuz"), guest_file("initramfs.cpio"));
     let (code, v) = env.json(&[
-        "vm", "create", "--name", "g", "--engine", "oxvmm", "--cpus", "1", "--memory", "512",
+        "vm", "create", "--name", "g", "--engine", "oxvmm", "--cpus", "2", "--memory", "512",
         "--kernel", &kernel, "--initrd", &initrd,
     ]);
     assert_eq!(code, 0, "{v}");

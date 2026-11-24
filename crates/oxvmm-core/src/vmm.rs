@@ -3,17 +3,20 @@
 use std::io::Write;
 use std::path::PathBuf;
 
-use oxvmm_hv::kvm::{Exit, HvError, Vm};
+use std::sync::{Arc, Mutex, mpsc};
+use std::thread;
+
+use oxvmm_hv::kvm::{Exit, HvError, Vcpu, Vm};
 use vmm_sys_util::eventfd::EventFd;
 
 use crate::devices::{COM1_IRQ, PioAction, PioBus};
 use crate::layout::{MIN_MEMORY_MIB, guest_memory};
-use crate::x86::{boot, cpu};
+use crate::x86::{acpi, boot, cpu};
 
 /// Kernel parameters oxvmm needs: serial console, keyboard-controller reboot (which oxvmm turns into
-/// a VM exit), no PCI scan, and fast exit on panic.
-pub const DEFAULT_CMDLINE: &str =
-    "console=ttyS0 reboot=k panic=1 pci=off i8042.noaux i8042.nomux i8042.nopnp i8042.dumbkbd";
+/// a VM exit), no PCI scan, and fast exit on panic. ACPI tells the kernel there is no PS/2
+/// controller, VGA or CMOS clock to probe.
+pub const DEFAULT_CMDLINE: &str = "console=ttyS0 reboot=k panic=1 pci=off";
 
 #[derive(Debug, Clone)]
 pub struct VmConfig {
@@ -39,9 +42,11 @@ impl VmConfig {
 /// Why the VM stopped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VmExit {
-    /// The guest asked for a reboot through the keyboard controller (Linux `reboot`, or `panic=N`).
+    /// The guest powered off through ACPI (Linux `poweroff`).
+    PowerOff,
+    /// The guest asked for a reboot (Linux `reboot`, or `panic=N`).
     Reset,
-    /// The vCPU triple-faulted or KVM reported a shutdown.
+    /// A vCPU triple-faulted or KVM reported a shutdown.
     TripleFault,
 }
 
@@ -59,58 +64,20 @@ pub enum VmmError {
     Io(#[from] std::io::Error),
 }
 
-/// Boot the guest and run it to completion on the calling thread. `ready` runs once the VM is fully
-/// set up, just before the first instruction executes.
-pub fn run(
-    config: &VmConfig,
-    serial_out: Box<dyn Write + Send>,
-    ready: impl FnOnce(),
-) -> Result<VmExit, VmmError> {
-    if config.vcpus != 1 {
-        return Err(VmmError::Config(format!(
-            "{} vCPUs requested; oxvmm boots a single vCPU until SMP tables (MP/ACPI) are implemented",
-            config.vcpus
-        )));
-    }
-    if config.memory_mib < MIN_MEMORY_MIB {
-        return Err(VmmError::Config(format!(
-            "at least {MIN_MEMORY_MIB} MiB of memory is required"
-        )));
-    }
-
-    // Field order matters for drop order: the VM (which references guest memory) goes first.
-    let memory = guest_memory(config.memory_mib).map_err(VmmError::Config)?;
-    let cmdline = config.cmdline();
-    let images = boot::BootImages {
-        kernel: &config.kernel,
-        initrd: config.initrd.as_deref(),
-        cmdline: &cmdline,
-        memory_mib: config.memory_mib,
-    };
-    let entry = boot::load(&memory, &images).map_err(VmmError::Boot)?;
-    cpu::write_boot_tables(&memory).map_err(VmmError::Boot)?;
-
-    let vm = Vm::new(&memory)?;
-    let serial_irq = EventFd::new(0)?;
-    vm.register_irqfd(&serial_irq, COM1_IRQ)?;
-    let mut bus = PioBus::new(serial_irq, serial_out);
-    let mut vcpu = vm.create_vcpu(0)?;
-    cpu::setup_boot_vcpu(&vcpu, vm.supported_cpuid()?, entry)?;
-    tracing::info!(memory_mib = config.memory_mib, kernel = %config.kernel.display(), %cmdline, "guest starting");
-    ready();
-
-    let exit = loop {
+/// Run one vCPU until the guest stops the VM or the vCPU fails.
+fn vcpu_loop(mut vcpu: Vcpu, bus: &Mutex<PioBus>) -> Result<VmExit, VmmError> {
+    loop {
         match vcpu.run()? {
-            Exit::IoIn { port, data } => bus.read(port, data),
-            Exit::IoOut { port, data } => {
-                if bus.write(port, data) == PioAction::Reset {
-                    break VmExit::Reset;
-                }
-            }
+            Exit::IoIn { port, data } => bus.lock().unwrap().read(port, data),
+            Exit::IoOut { port, data } => match bus.lock().unwrap().write(port, data) {
+                PioAction::Continue => {}
+                PioAction::Reset => return Ok(VmExit::Reset),
+                PioAction::PowerOff => return Ok(VmExit::PowerOff),
+            },
             // No MMIO devices yet: reads float high, writes are dropped.
             Exit::MmioRead { data, .. } => data.fill(0xff),
             Exit::MmioWrite { .. } | Exit::Interrupted => {}
-            Exit::Shutdown => break VmExit::TripleFault,
+            Exit::Shutdown => return Ok(VmExit::TripleFault),
             Exit::Hlt => {
                 return Err(VmmError::Guest(
                     "vCPU halted with no interrupt controller to wake it".into(),
@@ -120,10 +87,85 @@ pub fn run(
                 return Err(VmmError::Guest(format!("unexpected vCPU exit: {reason}")));
             }
         }
+    }
+}
+
+/// Boot the guest and run it until it powers off, reboots or crashes. `ready` runs once the VM is
+/// fully set up, just before the first instruction executes.
+///
+/// Every vCPU runs on its own thread. `run` returns as soon as any vCPU stops the VM; the other
+/// vCPU threads stay parked in the hypervisor until the process exits, which is how `oxvmm` (one
+/// process per VM) ends a VM.
+pub fn run(
+    config: &VmConfig,
+    serial_out: Box<dyn Write + Send>,
+    ready: impl FnOnce(),
+) -> Result<VmExit, VmmError> {
+    if config.vcpus == 0 || config.vcpus > acpi::MAX_VCPUS {
+        return Err(VmmError::Config(format!(
+            "between 1 and {} vCPUs are supported, not {}",
+            acpi::MAX_VCPUS,
+            config.vcpus
+        )));
+    }
+    if config.memory_mib < MIN_MEMORY_MIB {
+        return Err(VmmError::Config(format!(
+            "at least {MIN_MEMORY_MIB} MiB of memory is required"
+        )));
+    }
+
+    // vCPU threads hold the memory alive for as long as they may run guest code.
+    let memory = Arc::new(guest_memory(config.memory_mib).map_err(VmmError::Config)?);
+    let cmdline = config.cmdline();
+    let rsdp = acpi::write_tables(&memory, config.vcpus).map_err(VmmError::Boot)?;
+    let images = boot::BootImages {
+        kernel: &config.kernel,
+        initrd: config.initrd.as_deref(),
+        cmdline: &cmdline,
+        memory_mib: config.memory_mib,
+        acpi_rsdp: Some(rsdp),
     };
-    bus.flush();
-    drop(vcpu);
+    let entry = boot::load(&memory, &images).map_err(VmmError::Boot)?;
+    cpu::write_boot_tables(&memory).map_err(VmmError::Boot)?;
+
+    let vm = Vm::new(&memory)?;
+    let serial_irq = EventFd::new(0)?;
+    vm.register_irqfd(&serial_irq, COM1_IRQ)?;
+    let bus = Arc::new(Mutex::new(PioBus::new(serial_irq, serial_out)));
+    let cpuid = vm.supported_cpuid()?;
+    let mut vcpus = Vec::with_capacity(config.vcpus.into());
+    for id in 0..config.vcpus {
+        let vcpu = vm.create_vcpu(id)?;
+        cpu::setup_vcpu(
+            &vcpu,
+            cpuid.clone(),
+            id,
+            config.vcpus,
+            (id == 0).then_some(entry),
+        )?;
+        vcpus.push(vcpu);
+    }
+    tracing::info!(vcpus = config.vcpus, memory_mib = config.memory_mib, kernel = %config.kernel.display(), %cmdline, "guest starting");
+    ready();
+
+    let (stopped_tx, stopped_rx) = mpsc::channel();
+    for (id, vcpu) in vcpus.into_iter().enumerate() {
+        let (bus, memory, stopped) = (Arc::clone(&bus), Arc::clone(&memory), stopped_tx.clone());
+        thread::Builder::new()
+            .name(format!("vcpu{id}"))
+            .spawn(move || {
+                let result = vcpu_loop(vcpu, &bus);
+                let _ = stopped.send(result);
+                // Keep guest memory mapped until the process exits.
+                drop(memory);
+            })?;
+    }
+    drop(stopped_tx);
+    let result = stopped_rx
+        .recv()
+        .map_err(|_| VmmError::Guest("every vCPU thread ended without a result".into()))?;
+    bus.lock().unwrap().flush();
+    // Closing the VM fd is safe while vCPU threads run: each open vCPU fd keeps the VM alive.
     drop(vm);
-    drop(memory);
-    Ok(exit)
+    result
 }
