@@ -1,0 +1,544 @@
+{
+  "$defs": {
+    "Arch": {
+      "enum": [
+        "x86_64",
+        "aarch64"
+      ],
+      "type": "string"
+    },
+    "Attachment": {
+      "additionalProperties": false,
+      "properties": {
+        "device": {
+          "default": 0,
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "discard": {
+          "default": false,
+          "type": "boolean"
+        },
+        "kind": {
+          "$ref": "#/$defs/DeviceKind"
+        },
+        "medium": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "description": "Path relative to the machine folder, or absolute.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "port": {
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "ssd": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "port",
+        "kind"
+      ],
+      "type": "object"
+    },
+    "Boot": {
+      "additionalProperties": false,
+      "description": "Direct kernel boot (virtax-vmm). Paths are relative to the machine folder unless absolute.",
+      "properties": {
+        "cmdline": {
+          "description": "Extra kernel parameters, appended to the engine's defaults.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "initrd": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kernel": {
+          "description": "bzImage or ELF vmlinux.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kernel"
+      ],
+      "type": "object"
+    },
+    "Bus": {
+      "enum": [
+        "ide",
+        "sata",
+        "scsi",
+        "nvme",
+        "virtio"
+      ],
+      "type": "string"
+    },
+    "Chipset": {
+      "enum": [
+        "piix3",
+        "ich9",
+        "q35",
+        "armv8-virtual"
+      ],
+      "type": "string"
+    },
+    "Clipboard": {
+      "enum": [
+        "disabled",
+        "host-to-guest",
+        "guest-to-host",
+        "bidirectional"
+      ],
+      "type": "string"
+    },
+    "Cpu": {
+      "additionalProperties": false,
+      "properties": {
+        "count": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "prefer": {
+          "description": "Scheduling hint, e.g. `performance-cores`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "count"
+      ],
+      "type": "object"
+    },
+    "DeviceKind": {
+      "enum": [
+        "disk",
+        "dvd",
+        "floppy"
+      ],
+      "type": "string"
+    },
+    "Display": {
+      "additionalProperties": false,
+      "properties": {
+        "device": {
+          "default": "vmsvga",
+          "type": "string"
+        },
+        "monitors": {
+          "default": 1,
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "vram_mib": {
+          "default": 16,
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "EngineKind": {
+      "oneOf": [
+        {
+          "const": "vbox-legacy",
+          "description": "VirtualBox 7.2 driven through VBoxCAPI (Phase 1).",
+          "type": "string"
+        },
+        {
+          "const": "virtax-vmm",
+          "description": "The Rust VMM (Phase 2).",
+          "type": "string"
+        },
+        {
+          "const": "mock",
+          "description": "Deterministic in-process engine for development and tests; never runs a guest.",
+          "type": "string"
+        }
+      ]
+    },
+    "Firmware": {
+      "enum": [
+        "bios",
+        "efi"
+      ],
+      "type": "string"
+    },
+    "Integration": {
+      "additionalProperties": false,
+      "properties": {
+        "clipboard": {
+          "$ref": "#/$defs/Clipboard",
+          "default": "disabled"
+        },
+        "shared_folders": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/SharedFolder"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "Memory": {
+      "additionalProperties": false,
+      "properties": {
+        "balloon": {
+          "default": false,
+          "type": "boolean"
+        },
+        "size_mib": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "size_mib"
+      ],
+      "type": "object"
+    },
+    "NetAttachment": {
+      "oneOf": [
+        {
+          "description": "Forwards use `proto:host_port:guest_port`, e.g. `tcp:2222:22`.",
+          "properties": {
+            "forwards": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "kind": {
+              "const": "nat",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "interface": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "bridged",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "interface"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "host-only",
+              "type": "string"
+            },
+            "network": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "network"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "internal",
+              "type": "string"
+            },
+            "network": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "network"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "not-attached",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Nic": {
+      "additionalProperties": false,
+      "properties": {
+        "attachment": {
+          "$ref": "#/$defs/NetAttachment"
+        },
+        "mac": {
+          "type": "string"
+        },
+        "model": {
+          "$ref": "#/$defs/NicModel"
+        },
+        "slot": {
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "slot",
+        "model",
+        "mac",
+        "attachment"
+      ],
+      "type": "object"
+    },
+    "NicModel": {
+      "enum": [
+        "e1000",
+        "virtio-net",
+        "pcnet"
+      ],
+      "type": "string"
+    },
+    "Platform": {
+      "additionalProperties": false,
+      "properties": {
+        "arch": {
+          "$ref": "#/$defs/Arch"
+        },
+        "chipset": {
+          "$ref": "#/$defs/Chipset"
+        },
+        "firmware": {
+          "$ref": "#/$defs/Firmware"
+        },
+        "secure_boot": {
+          "default": false,
+          "type": "boolean"
+        },
+        "tpm": {
+          "$ref": "#/$defs/Tpm",
+          "default": "none"
+        }
+      },
+      "required": [
+        "arch",
+        "chipset",
+        "firmware"
+      ],
+      "type": "object"
+    },
+    "SharedFolder": {
+      "additionalProperties": false,
+      "properties": {
+        "guest": {
+          "type": "string"
+        },
+        "host": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "rw": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name",
+        "host",
+        "guest"
+      ],
+      "type": "object"
+    },
+    "Storage": {
+      "additionalProperties": false,
+      "properties": {
+        "controllers": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/StorageController"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "StorageController": {
+      "additionalProperties": false,
+      "properties": {
+        "attachments": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Attachment"
+          },
+          "type": "array"
+        },
+        "bus": {
+          "$ref": "#/$defs/Bus"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "bus"
+      ],
+      "type": "object"
+    },
+    "Tpm": {
+      "enum": [
+        "none",
+        "1.2",
+        "2.0"
+      ],
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "boot": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Boot"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "cpu": {
+      "$ref": "#/$defs/Cpu"
+    },
+    "display": {
+      "$ref": "#/$defs/Display",
+      "default": {
+        "device": "vmsvga",
+        "monitors": 1,
+        "vram_mib": 16
+      }
+    },
+    "engine": {
+      "$ref": "#/$defs/EngineKind"
+    },
+    "engine_overrides": {
+      "additionalProperties": {
+        "additionalProperties": {
+          "type": "string"
+        },
+        "type": "object"
+      },
+      "description": "Per-engine key/value escape hatch, e.g. `[engine_overrides.vbox-legacy]`.",
+      "type": "object"
+    },
+    "groups": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "id": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "integration": {
+      "$ref": "#/$defs/Integration",
+      "default": {
+        "clipboard": "disabled",
+        "shared_folders": []
+      }
+    },
+    "memory": {
+      "$ref": "#/$defs/Memory"
+    },
+    "name": {
+      "type": "string"
+    },
+    "nics": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/Nic"
+      },
+      "type": "array"
+    },
+    "os_type": {
+      "type": "string"
+    },
+    "platform": {
+      "$ref": "#/$defs/Platform"
+    },
+    "schema": {
+      "type": "string"
+    },
+    "storage": {
+      "$ref": "#/$defs/Storage",
+      "default": {
+        "controllers": []
+      }
+    },
+    "tags": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "schema",
+    "id",
+    "name",
+    "os_type",
+    "engine",
+    "platform",
+    "cpu",
+    "memory"
+  ],
+  "title": "MachineManifest",
+  "type": "object"
+}

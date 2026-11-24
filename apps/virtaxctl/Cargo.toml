@@ -1,0 +1,22 @@
+[package]
+name = "virtaxctl"
+description = "Virtax command-line client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+virtax-api.workspace = true
+virtax-model.workspace = true
+clap.workspace = true
+prost-types.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tonic.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

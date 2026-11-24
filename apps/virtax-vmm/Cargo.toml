@@ -1,0 +1,21 @@
+[package]
+name = "virtax-vmm"
+description = "virtax-vmm: one Rust VMM process per virtual machine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+virtax-vmm-core = { path = "../../crates/virtax-vmm-core" }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
