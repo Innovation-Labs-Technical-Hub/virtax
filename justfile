@@ -63,7 +63,19 @@ e2e *filter:
 
 # Validate the OpenSpec specs and changes (strict), e.g. before merging a change.
 spec:
-    bunx @fission-ai/openspec@2.1.1 validate --all --strict --no-interactive
+    cargo xtask spec
+
+# Licences, advisories, bans and sources (cargo-deny), then audited dependencies (cargo-vet).
+deny:
+    cargo xtask deny
+
+# RustSec advisories for Cargo.lock (cargo-audit).
+audit:
+    cargo xtask audit
+
+# buf lint on the protocol; with a git ref, also buf breaking against it, e.g. `just proto origin/main`.
+proto *against:
+    cargo xtask proto {{against}}
 
 # Regenerate schemas/virtax.machine.v1.json.
 schema:

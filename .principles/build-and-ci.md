@@ -37,7 +37,8 @@ Scope: `Cargo.toml`, `rust-toolchain.toml`, `xtask/`, `justfile`, `Makefile`, `.
 | 3, 4 | `.github/workflows/ci.yml` job `kvm boot tests`; `cargo xtask kvm-test` refuses to run without the cached guest |
 | 6 | `just dev-up` checks the pidfile; `virtaxd` refuses a second instance on the same data directory |
 | 1, 7 | Code review |
-| — | Not yet enforced: release pipeline, SBOM and signed artifacts (FR-PL01-012), performance gates (FR-PL01-007), OpenSpec validation in CI (run `just spec` locally) |
+| — | CI jobs `supply chain (deny, vet)`, `openspec validate`, `proto (buf lint, breaking)`, `multi-user socket test`; daily `Security audit` workflow |
+| — | Not yet enforced: release pipeline, SBOM and signed artifacts (FR-PL01-012), performance gates (FR-PL01-007) |
 
 ## Anti-patterns
 

@@ -56,7 +56,11 @@ just                 # list recipes (`make <recipe>` forwards to the same recipe
 just doctor          # what this host can run: KVM, busybox-static, test guest, dev daemon
 just ci              # = cargo xtask ci: fmt check, lint policy, clippy -D warnings, all tests
 just test <filter>   # cargo test --workspace --locked -- <filter>
-just spec            # OpenSpec strict validation
+just spec            # = cargo xtask spec: OpenSpec strict validation
+just deny            # = cargo xtask deny: cargo-deny (deny.toml) then cargo-vet (supply-chain/)
+just audit           # = cargo xtask audit: RustSec advisories (also runs daily in CI)
+just proto [ref]     # = cargo xtask proto: buf lint, plus buf breaking against a git ref
+cargo xtask multiuser-test   # second OS user is refused (Linux, passwordless sudo; CI only)
 just guest           # pinned test kernel + busybox initramfs in .cache/guest
 just kvm-test        # tests that boot real guests (needs /dev/kvm)
 just dev-up / dev-down / ctl <args> / demo   # a dev daemon with data in .cache/dev

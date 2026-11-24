@@ -20,7 +20,7 @@ From now on they are the source of truth: edit them through changes, not by rege
 
 ## Commands
 
-The CLI is pinned to 2.1.1; `just spec` runs the validation.
+The CLI is pinned to 2.1.1; `just spec` (`cargo xtask spec`) runs the validation, also in CI.
 
 ```sh
 bunx @fission-ai/openspec@2.1.1 list --specs                 # capabilities
