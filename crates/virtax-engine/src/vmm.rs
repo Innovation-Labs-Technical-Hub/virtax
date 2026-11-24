@@ -469,8 +469,8 @@ mod tests {
     async fn a_failing_vmm_leaves_the_machine_off() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("vmlinuz"), b"k").unwrap();
-        // `false` exits at once without printing the ready line.
-        let engine = VirtaxVmmEngine::new(PathBuf::from("/bin/false"));
+        // `false` (found on PATH) exits at once without printing the ready line.
+        let engine = VirtaxVmmEngine::new(PathBuf::from("false"));
         let mut m = MachineManifest::new("v", "Linux_64", EngineKind::VirtaxVmm);
         m.platform.arch = Arch::X86_64;
         m.boot = Some(virtax_model::Boot {

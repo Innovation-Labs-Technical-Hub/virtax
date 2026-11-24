@@ -11,6 +11,7 @@ use clap::Parser;
 
 /// Printed on stderr once the VM is built and the guest is about to run. `virtaxd`'s
 /// `VirtaxVmmEngine` waits for this exact line.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 const READY_LINE: &str = "virtax-vmm: guest running";
 
 #[derive(Parser, Debug)]

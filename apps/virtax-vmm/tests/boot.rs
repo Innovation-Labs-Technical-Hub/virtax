@@ -104,6 +104,8 @@ fn kvm_boots_four_vcpus_and_powers_off_through_acpi() {
 }
 
 #[test]
+// Elsewhere the binary only reports that the host is unsupported.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 fn rejects_an_invalid_vcpu_count_before_touching_kvm() {
     let out = Command::new(env!("CARGO_BIN_EXE_virtax-vmm"))
         .args(["--kernel", "/nonexistent", "--cpus", "0"])
