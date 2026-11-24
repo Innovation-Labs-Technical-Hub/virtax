@@ -290,6 +290,19 @@ pub struct Integration {
     pub shared_folders: Vec<SharedFolder>,
 }
 
+/// Direct kernel boot (oxvmm). Paths are relative to the machine folder unless absolute.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Boot {
+    /// bzImage or ELF vmlinux.
+    pub kernel: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initrd: Option<String>,
+    /// Extra kernel parameters, appended to the engine's defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cmdline: Option<String>,
+}
+
 /// Top-level keys of the manifest; anything else must be an `x-` extension.
 const KNOWN_KEYS: &[&str] = &[
     "schema",
@@ -306,6 +319,7 @@ const KNOWN_KEYS: &[&str] = &[
     "storage",
     "nics",
     "integration",
+    "boot",
     "engine_overrides",
 ];
 
@@ -331,6 +345,8 @@ pub struct MachineManifest {
     pub nics: Vec<Nic>,
     #[serde(default)]
     pub integration: Integration,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boot: Option<Boot>,
     /// Per-engine key/value escape hatch, e.g. `[engine_overrides.vbox-legacy]`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub engine_overrides: BTreeMap<String, BTreeMap<String, String>>,
@@ -459,6 +475,7 @@ impl MachineManifest {
             storage: Storage::default(),
             nics: Vec::new(),
             integration: Integration::default(),
+            boot: None,
             engine_overrides: BTreeMap::new(),
             extensions: BTreeMap::new(),
         }
@@ -513,6 +530,11 @@ impl MachineManifest {
                 "platform.secure_boot",
                 "requires `firmware = \"efi\"`",
             ));
+        }
+        if let Some(boot) = &self.boot
+            && boot.kernel.trim().is_empty()
+        {
+            issues.push(Issue::at("boot.kernel", "must not be empty"));
         }
         let mut names = BTreeSet::new();
         for (i, c) in self.storage.controllers.iter().enumerate() {
@@ -605,6 +627,10 @@ model = "virtio-net"
 mac = "08:00:27:AB:12:CD"
 attachment = { kind = "nat", forwards = ["tcp:2222:22"] }
 
+[boot]
+kernel = "boot/vmlinuz"
+cmdline = "quiet"
+
 [engine_overrides.vbox-legacy]
 "VBoxInternal/TM/TSCMode" = "RealTSCOffset"
 "#;
@@ -615,6 +641,7 @@ attachment = { kind = "nat", forwards = ["tcp:2222:22"] }
         assert_eq!(m.cpu.count, 4);
         assert_eq!(m.platform.tpm, Tpm::V2_0);
         assert!(m.extensions.contains_key("x-team"));
+        assert_eq!(m.boot.as_ref().unwrap().kernel, "boot/vmlinuz");
         let again = parse_manifest(&m.to_toml()).expect("round trip");
         assert_eq!(m, again);
     }

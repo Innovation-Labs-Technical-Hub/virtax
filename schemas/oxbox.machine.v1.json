@@ -55,6 +55,33 @@
       ],
       "type": "object"
     },
+    "Boot": {
+      "additionalProperties": false,
+      "description": "Direct kernel boot (oxvmm). Paths are relative to the machine folder unless absolute.",
+      "properties": {
+        "cmdline": {
+          "description": "Extra kernel parameters, appended to the engine's defaults.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "initrd": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kernel": {
+          "description": "bzImage or ELF vmlinux.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kernel"
+      ],
+      "type": "object"
+    },
     "Bus": {
       "enum": [
         "ide",
@@ -414,6 +441,16 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "properties": {
+    "boot": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Boot"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "cpu": {
       "$ref": "#/$defs/Cpu"
     },

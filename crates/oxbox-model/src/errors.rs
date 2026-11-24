@@ -57,6 +57,10 @@ catalogue! {
         "Thao tác đã bị huỷ.", "Run the command again if you still need it.";
     ENG_NOT_AVAILABLE = "OXE-ENG-002", "The engine for this machine is not available on this host.",
         "Engine của máy ảo này không có trên máy chủ.", "Install the required engine or move the machine to an available one.";
+    ENG_UNSUPPORTED = "OXE-ENG-010", "This engine cannot do that yet.",
+        "Engine này chưa hỗ trợ thao tác đó.", "For oxvmm machines, power off with `oxctl vm stop --force`.";
+    ENG_VM_CONFIG = "OXE-ENG-011", "The machine configuration cannot run on this engine.",
+        "Cấu hình máy ảo không chạy được trên engine này.", "See the detail, change the setting with `oxctl vm set`, then start again.";
     ENG_FAILED = "OXE-ENG-999", "The virtualization engine reported an error.",
         "Engine ảo hoá báo lỗi.", "Copy the technical details and check the machine log.";
 }

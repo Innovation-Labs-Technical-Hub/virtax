@@ -2,7 +2,9 @@
 //! never knows whether a VM runs on the VirtualBox legacy engine, `oxvmm`, or the `MockEngine`.
 
 pub mod mock;
+pub mod oxvmm;
 
+use std::path::Path;
 use std::sync::Arc;
 
 use futures::stream::BoxStream;
@@ -11,6 +13,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 pub use mock::MockEngine;
+pub use oxvmm::OxvmmEngine;
 
 #[derive(Debug, Clone)]
 pub struct HostInfo {
@@ -104,7 +107,9 @@ pub trait Engine: Send + Sync + 'static {
     async fn capabilities(&self, host: &HostInfo) -> EngineCaps;
 
     /// Register a machine with the engine (also used at startup for machines already in the registry).
-    async fn register(&self, manifest: &MachineManifest) -> Result<(), EngineError>;
+    /// `folder` is the machine folder; relative paths in the manifest resolve against it and the
+    /// engine keeps its logs under `<folder>/logs`.
+    async fn register(&self, manifest: &MachineManifest, folder: &Path) -> Result<(), EngineError>;
 
     async fn unregister(&self, id: Uuid) -> Result<(), EngineError>;
 
@@ -126,4 +131,17 @@ pub trait Engine: Send + Sync + 'static {
 
     /// By-value state events for every machine the engine manages.
     fn events(&self) -> BoxStream<'static, EngineEvent>;
+}
+
+/// When a change to `field_path` takes effect, for engines that cannot change hardware live:
+/// metadata is live, display and boot settings wait for the next boot, the rest needs power-off.
+pub fn apply_mode_for(state: MachineState, field_path: &str) -> ApplyMode {
+    if !state.is_live() {
+        return ApplyMode::Live;
+    }
+    match field_path.split('.').next().unwrap_or(field_path) {
+        "name" | "groups" | "tags" | "os_type" | "integration" => ApplyMode::Live,
+        "display" | "boot" => ApplyMode::NextBoot,
+        _ => ApplyMode::NeedsPowerOff,
+    }
 }

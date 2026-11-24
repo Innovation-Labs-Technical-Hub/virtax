@@ -49,7 +49,10 @@ config_fields!(
     vram_mib,
     monitors,
     firmware,
-    secure_boot
+    secure_boot,
+    boot_kernel,
+    boot_initrd,
+    boot_cmdline
 );
 
 pub fn apply_mode_name(mode: pb::ApplyMode) -> &'static str {

@@ -3,11 +3,15 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
+mod guest;
+
 const USAGE: &str = "usage: cargo xtask <command>
 
 commands:
   ci [--quick]   fmt check, workspace lint policy, clippy -D warnings, tests (--quick skips clippy)
   e2e [filter]   run the oxctl end-to-end tests (optionally filter by test name)
+  guest-kernel   fetch the pinned test kernel and build the busybox initramfs (.cache/guest)
+  kvm-test       run the tests that boot real guests on KVM (needs /dev/kvm and guest-kernel)
   schema         write the machine.toml JSON Schema to schemas/oxbox.machine.v1.json";
 
 fn root() -> PathBuf {
@@ -32,16 +36,33 @@ fn cargo(args: &[&str]) -> Result<(), String> {
     }
 }
 
-/// Every package must inherit the workspace lints, which forbid `unsafe_code`.
-/// Crates that need FFI (`*-sys`, `oxvmm-hv`) will be listed here explicitly when they land.
+/// Crates allowed to use `unsafe`. They must deny undocumented unsafe blocks instead.
+const UNSAFE_ALLOWED: &[&str] = &["crates/oxvmm-hv"];
+
+/// Every package must inherit the workspace lints, which forbid `unsafe_code`, except the crates in
+/// `UNSAFE_ALLOWED`, which must require a `SAFETY:` comment on every unsafe block.
 fn check_lint_policy() -> Result<(), String> {
     let mut missing = Vec::new();
+    for krate in UNSAFE_ALLOWED {
+        let manifest = root().join(krate).join("Cargo.toml");
+        let text = std::fs::read_to_string(&manifest)
+            .map_err(|e| format!("{}: {e}", manifest.display()))?;
+        if !text.contains("undocumented_unsafe_blocks = \"deny\"") {
+            missing.push(format!(
+                "{}: must deny clippy::undocumented_unsafe_blocks",
+                manifest.display()
+            ));
+        }
+    }
     for dir in ["crates", "apps"] {
         let Ok(entries) = std::fs::read_dir(root().join(dir)) else {
             continue;
         };
         for entry in entries.flatten() {
             let manifest = entry.path().join("Cargo.toml");
+            if UNSAFE_ALLOWED.iter().any(|k| entry.path().ends_with(k)) {
+                continue;
+            }
             if let Ok(text) = std::fs::read_to_string(&manifest)
                 && !text.contains("[lints]\nworkspace = true")
             {
@@ -88,6 +109,14 @@ fn e2e(args: &[String]) -> Result<(), String> {
     cargo(&command)
 }
 
+fn kvm_test() -> Result<(), String> {
+    let dir = guest::dir(&root());
+    if !dir.join("vmlinuz").exists() || !dir.join("initramfs.cpio").exists() {
+        return Err("no test guest; run `cargo xtask guest-kernel` first".into());
+    }
+    cargo(&["test", "--workspace", "--locked", "--", "--ignored", "kvm_"])
+}
+
 fn schema() -> Result<(), String> {
     let out = root().join("schemas");
     std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
@@ -112,6 +141,8 @@ fn main() -> ExitCode {
         Some("ci") => ci(args.iter().any(|a| a == "--quick")),
         Some("e2e") => e2e(&args[1..]),
         Some("schema") => schema(),
+        Some("guest-kernel") => guest::fetch(&root()),
+        Some("kvm-test") => kvm_test(),
         _ => {
             eprintln!("{USAGE}");
             return ExitCode::from(2);

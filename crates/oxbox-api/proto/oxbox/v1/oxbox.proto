@@ -42,6 +42,12 @@ message MachineConfig {
   // bios | efi
   string firmware = 9;
   bool secure_boot = 10;
+  // Direct kernel boot (oxvmm). Empty boot_kernel means no [boot] table. Paths are relative to the
+  // machine folder unless absolute.
+  string boot_kernel = 11;
+  string boot_initrd = 12;
+  // Extra kernel parameters.
+  string boot_cmdline = 13;
 }
 
 message Machine {

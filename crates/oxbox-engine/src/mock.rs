@@ -144,7 +144,11 @@ impl Engine for MockEngine {
         }
     }
 
-    async fn register(&self, manifest: &MachineManifest) -> Result<(), EngineError> {
+    async fn register(
+        &self,
+        manifest: &MachineManifest,
+        _folder: &std::path::Path,
+    ) -> Result<(), EngineError> {
         self.machines
             .lock()
             .unwrap()
@@ -167,15 +171,7 @@ impl Engine for MockEngine {
     }
 
     async fn apply_mode(&self, id: Uuid, field_path: &str) -> Result<ApplyMode, EngineError> {
-        if !self.get(id)?.is_live() {
-            return Ok(ApplyMode::Live);
-        }
-        let top = field_path.split('.').next().unwrap_or(field_path);
-        Ok(match top {
-            "name" | "groups" | "tags" | "os_type" | "integration" => ApplyMode::Live,
-            "display" => ApplyMode::NextBoot,
-            _ => ApplyMode::NeedsPowerOff,
-        })
+        Ok(crate::apply_mode_for(self.get(id)?, field_path))
     }
 
     async fn apply(
@@ -234,7 +230,7 @@ mod tests {
     async fn start_stop_emits_events() {
         let e = MockEngine::new(Duration::from_millis(8));
         let m = vm();
-        e.register(&m).await.unwrap();
+        e.register(&m, std::path::Path::new("/tmp")).await.unwrap();
         let mut events = e.events();
         e.start(m.id, StartOpts::default(), OpHandle::detached())
             .await
@@ -277,7 +273,7 @@ mod tests {
     async fn cancel_restores_previous_state() {
         let e = MockEngine::new(Duration::from_secs(10));
         let m = vm();
-        e.register(&m).await.unwrap();
+        e.register(&m, std::path::Path::new("/tmp")).await.unwrap();
         let cancel = CancellationToken::new();
         let op = OpHandle::new(|_, _| {}, cancel.clone());
         cancel.cancel();
@@ -292,7 +288,7 @@ mod tests {
     async fn scripted_failure_aborts() {
         let e = MockEngine::new(Duration::ZERO);
         let m = vm();
-        e.register(&m).await.unwrap();
+        e.register(&m, std::path::Path::new("/tmp")).await.unwrap();
         e.fail_next(MockOp::Start, "OXE-HV-002");
         let err = e
             .start(m.id, StartOpts::default(), OpHandle::detached())

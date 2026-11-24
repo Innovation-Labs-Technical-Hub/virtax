@@ -23,6 +23,10 @@ then a Rust VMM (`oxvmm`). The design set (C4 architecture, BRDs, module index) 
 - `oxctl`, which can create, list, show, set, start, stop and delete VMs, plus `ops`, `events` and `version` commands.
   It supports `--json`, documented exit codes, and local `vm validate` / `vm schema`.
 
+- `oxvmm`, the Rust VMM (one process per VM, KVM on Linux x86_64, built on rust-vmm crates): boots a Linux
+  kernel + initramfs directly to a serial console in `<vm folder>/logs/serial.log`. `oxboxd` runs it through
+  `OxvmmEngine` (the default engine when `/dev/kvm` is usable). See [docs/oxvmm.md](docs/oxvmm.md).
+
 Not yet: the VirtualBox legacy engine (VBoxCAPI FFI), the console/framebuffer data plane, the Manager UI, snapshots, media, networking, and Windows named pipes. **With only `MockEngine`, no guest runs.**
 
 ## Layout
@@ -32,6 +36,9 @@ Not yet: the VirtualBox legacy engine (VBoxCAPI FFI), the console/framebuffer da
 | `crates/oxbox-model` | Domain types, `machine.toml` (`oxbox.machine/1`) + JSON Schema, VM lifecycle, OXE error catalogue |
 | `crates/oxbox-store` | Registry (SQLite), atomic manifest I/O, folder locks |
 | `crates/oxbox-engine` | `Engine` trait, `MockEngine` |
+| `crates/oxvmm-hv` | Hypervisor backends (KVM); the only crate allowed `unsafe`, each block justified |
+| `crates/oxvmm-core` | Guest memory layout, x86_64 direct boot, serial/i8042 devices, vCPU run loop |
+| `apps/oxvmm` | The VMM process, one per VM |
 | `crates/oxbox-api` | `proto/oxbox/v1/oxbox.proto`, generated stubs, UDS client connector |
 | `apps/oxboxd` | Daemon |
 | `apps/oxctl` | CLI (`tests/e2e.rs` drives the real binaries) |
@@ -50,6 +57,17 @@ cargo run -p oxctl -- vm create --name web --os-type Ubuntu_64 --cpus 2 --memory
 cargo run -p oxctl -- vm start web
 cargo run -p oxctl -- --json vm list
 cargo run -p oxctl -- vm set web --memory 4096 --dry-run   # shows when each change applies
+```
+
+Boot a real guest on KVM (Linux x86_64, user in the `kvm` group, `busybox-static` installed):
+
+```sh
+cargo xtask guest-kernel                 # pinned Ubuntu kernel + busybox initramfs in .cache/guest
+cargo build -p oxvmm && cargo run -p oxboxd &
+cargo run -p oxctl -- vm create --name g --cpus 1 --memory 512 \
+  --kernel .cache/guest/vmlinuz --initrd .cache/guest/initramfs.cpio
+cargo run -p oxctl -- vm start g         # the test guest prints a marker and reboots, ending the VM
+cargo xtask kvm-test                     # the KVM boot tests
 ```
 
 `OXBOX_SOCKET` and `OXBOX_DATA_DIR` override the socket and data locations. Unix socket paths must stay

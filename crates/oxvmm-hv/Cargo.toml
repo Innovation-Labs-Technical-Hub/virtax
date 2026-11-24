@@ -1,0 +1,21 @@
+[package]
+name = "oxvmm-hv"
+description = "oxvmm hypervisor backends (KVM); the only oxvmm crate allowed to use unsafe"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+kvm-bindings = { version = "0.14", features = ["fam-wrappers"] }
+kvm-ioctls = "0.25"
+thiserror.workspace = true
+vm-memory = { version = "0.18", features = ["backend-mmap"] }
+vmm-sys-util = "0.15"
+
+# Not the workspace lints: this crate needs `unsafe`, but every block must be justified.
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"

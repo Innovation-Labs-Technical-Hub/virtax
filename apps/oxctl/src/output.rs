@@ -40,6 +40,9 @@ pub fn machine(m: &pb::Machine) -> Value {
             "monitors": c.monitors,
             "firmware": c.firmware,
             "secure_boot": c.secure_boot,
+            "boot": if c.boot_kernel.is_empty() { Value::Null } else {
+                json!({"kernel": c.boot_kernel, "initrd": c.boot_initrd, "cmdline": c.boot_cmdline})
+            },
         },
     })
 }

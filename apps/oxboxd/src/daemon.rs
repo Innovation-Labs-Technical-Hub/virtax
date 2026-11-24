@@ -38,6 +38,9 @@ pub const MASK_PATHS: &[(&str, &str)] = &[
     ("monitors", "display.monitors"),
     ("firmware", "platform.firmware"),
     ("secure_boot", "platform.secure_boot"),
+    ("boot_kernel", "boot.kernel"),
+    ("boot_initrd", "boot.initrd"),
+    ("boot_cmdline", "boot.cmdline"),
 ];
 
 const FINISHED_OP_RETENTION: Duration = Duration::from_secs(300);
@@ -111,6 +114,21 @@ fn config_from_manifest(m: &MachineManifest) -> pb::MachineConfig {
         monitors: m.display.monitors.into(),
         firmware: m.platform.firmware.as_str().into(),
         secure_boot: m.platform.secure_boot,
+        boot_kernel: m
+            .boot
+            .as_ref()
+            .map(|b| b.kernel.clone())
+            .unwrap_or_default(),
+        boot_initrd: m
+            .boot
+            .as_ref()
+            .and_then(|b| b.initrd.clone())
+            .unwrap_or_default(),
+        boot_cmdline: m
+            .boot
+            .as_ref()
+            .and_then(|b| b.cmdline.clone())
+            .unwrap_or_default(),
     }
 }
 
@@ -141,6 +159,10 @@ pub(crate) fn apply_field(
             })?
         }
         "secure_boot" => m.platform.secure_boot = c.secure_boot,
+        "boot_kernel" if c.boot_kernel.trim().is_empty() => m.boot = None,
+        "boot_kernel" => boot_mut(m).kernel = c.boot_kernel.trim().to_string(),
+        "boot_initrd" => boot_mut(m).initrd = non_empty(&c.boot_initrd),
+        "boot_cmdline" => boot_mut(m).cmdline = non_empty(&c.boot_cmdline),
         other => {
             return Err(ApiError::bad_request(format!(
                 "unknown update_mask path `{other}`"
@@ -148,6 +170,19 @@ pub(crate) fn apply_field(
         }
     }
     Ok(())
+}
+
+/// The `[boot]` table, created empty if missing (validation rejects an empty kernel).
+fn boot_mut(m: &mut MachineManifest) -> &mut oxbox_model::Boot {
+    m.boot.get_or_insert_with(|| oxbox_model::Boot {
+        kernel: String::new(),
+        initrd: None,
+        cmdline: None,
+    })
+}
+
+fn non_empty(s: &str) -> Option<String> {
+    Some(s.trim().to_string()).filter(|s| !s.is_empty())
 }
 
 pub(crate) fn manifest_path_of(api_path: &str) -> Option<&'static str> {
@@ -237,7 +272,9 @@ impl Daemon {
         default_engine: Option<EngineKind>,
     ) -> Arc<Self> {
         let engines: HashMap<_, _> = engines.into_iter().map(|e| (e.kind(), e)).collect();
-        let default_engine = default_engine.or_else(|| engines.keys().next().copied());
+        let default_engine = default_engine
+            .filter(|k| engines.contains_key(k))
+            .or_else(|| engines.keys().next().copied());
         Arc::new(Self {
             data_dir,
             registry: Mutex::new(registry),
@@ -433,7 +470,9 @@ impl Daemon {
             )
             .into());
         }
-        self.engine(manifest.engine)?.register(&manifest).await?;
+        self.engine(manifest.engine)?
+            .register(&manifest, &row.folder)
+            .await?;
         self.folder_locks.lock().unwrap().insert(row.id, lock);
         Ok((manifest, notice))
     }
@@ -546,6 +585,11 @@ impl Daemon {
             apply_field(&mut m, &c, "firmware")?;
         }
         m.platform.secure_boot = c.secure_boot;
+        for field in ["boot_kernel", "boot_initrd", "boot_cmdline"] {
+            if !c.boot_kernel.trim().is_empty() {
+                apply_field(&mut m, &c, field)?;
+            }
+        }
         let issues = m.validate();
         if !issues.is_empty() {
             return Err(invalid_manifest(&issues));
@@ -589,7 +633,7 @@ impl Daemon {
             }
             return Err(e.into());
         }
-        engine.register(&m).await?;
+        engine.register(&m, &folder).await?;
         self.folder_locks.lock().unwrap().insert(m.id, lock);
         tracing::info!(vm = %m.id, name = %m.name, folder = %folder.display(), "machine created");
         self.emit(

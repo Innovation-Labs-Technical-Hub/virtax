@@ -13,7 +13,15 @@ fn oxboxd_bin() -> &'static Path {
     BIN.get_or_init(|| {
         let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
         let status = Command::new(cargo)
-            .args(["build", "--locked", "--quiet", "--package", "oxboxd"])
+            .args([
+                "build",
+                "--locked",
+                "--quiet",
+                "--package",
+                "oxboxd",
+                "--package",
+                "oxvmm",
+            ])
             .current_dir(env!("CARGO_MANIFEST_DIR"))
             .status()
             .expect("run cargo build");
@@ -29,6 +37,7 @@ struct Env {
     data_dir: PathBuf,
     socket: PathBuf,
     daemon: Option<Child>,
+    mock: bool,
 }
 
 impl Env {
@@ -45,16 +54,27 @@ impl Env {
             _data: data,
             run,
             daemon: None,
+            mock: true,
         };
+        env.start_daemon();
+        env
+    }
+
+    /// A daemon with only the real engines (oxvmm on KVM, found next to oxboxd).
+    fn without_mock() -> Self {
+        let mut env = Self::new();
+        env.stop_daemon();
+        env.mock = false;
         env.start_daemon();
         env
     }
 
     fn daemon_cmd(&self) -> Command {
         let mut cmd = Command::new(oxboxd_bin());
-        cmd.arg("--mock-engine")
-            .args(["--mock-latency-ms", "40"])
-            .arg("--socket")
+        if self.mock {
+            cmd.arg("--mock-engine").args(["--mock-latency-ms", "40"]);
+        }
+        cmd.arg("--socket")
             .arg(&self.socket)
             .arg("--data-dir")
             .arg(&self.data_dir)
@@ -455,4 +475,111 @@ fn changes_queued_at_shutdown_apply_after_stop() {
         "the cancelled change was not applied"
     );
     assert_eq!(v["config"]["tags"][0], "db");
+}
+
+fn guest_file(name: &str) -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../.cache/guest")
+        .join(name);
+    path.canonicalize()
+        .unwrap_or_else(|_| panic!("{} missing; run `cargo xtask guest-kernel`", path.display()))
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn wait_for_state(env: &Env, vm: &str, state: &str, within: Duration) -> Value {
+    let deadline = Instant::now() + within;
+    loop {
+        let (_, v) = env.json(&["vm", "show", vm]);
+        if v["summary"]["state"] == state {
+            return v;
+        }
+        assert!(Instant::now() < deadline, "{vm} never reached {state}: {v}");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[test]
+#[ignore = "needs /dev/kvm and `cargo xtask guest-kernel`; run with `cargo xtask kvm-test`"]
+fn kvm_guest_boots_through_oxctl_and_powers_off() {
+    let env = Env::without_mock();
+    let (kernel, initrd) = (guest_file("vmlinuz"), guest_file("initramfs.cpio"));
+    let (code, v) = env.json(&[
+        "vm", "create", "--name", "g", "--engine", "oxvmm", "--cpus", "1", "--memory", "512",
+        "--kernel", &kernel, "--initrd", &initrd,
+    ]);
+    assert_eq!(code, 0, "{v}");
+    assert_eq!(v["summary"]["engine"], "oxvmm");
+    let serial = Path::new(v["folder"].as_str().unwrap()).join("logs/serial.log");
+
+    // The test guest reboots right after printing its marker, which ends the VM by itself.
+    let (code, v) = env.json(&["vm", "start", "g"]);
+    assert_eq!((code, v["state"].as_str()), (0, Some("succeeded")), "{v}");
+    wait_for_state(&env, "g", "powered_off", Duration::from_secs(60));
+    let log = std::fs::read_to_string(&serial).unwrap();
+    assert!(
+        log.contains("OXVMM-GUEST-OK"),
+        "no userspace marker in {}:\n{log}",
+        serial.display()
+    );
+
+    // Keep the guest up, then power it off from outside.
+    assert_eq!(
+        env.json(&["vm", "set", "g", "--cmdline", "oxvmm.hold"]).0,
+        0
+    );
+    assert_eq!(env.json(&["vm", "start", "g"]).0, 0);
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while std::fs::read_to_string(&serial)
+        .unwrap()
+        .matches("OXVMM-GUEST-OK")
+        .count()
+        < 2
+    {
+        assert!(
+            Instant::now() < deadline,
+            "second boot never reached userspace"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    wait_for_state(&env, "g", "running", Duration::from_secs(1));
+    let (code, v) = env.json(&["vm", "stop", "g"]);
+    assert_eq!(
+        (code, v["error"]["code"].as_str()),
+        (10, Some("OXE-ENG-010")),
+        "ACPI shutdown is not available yet"
+    );
+    let (code, v) = env.json(&["vm", "stop", "g", "--force"]);
+    assert_eq!(code, 0, "{v}");
+    wait_for_state(&env, "g", "powered_off", Duration::from_secs(5));
+}
+
+#[test]
+fn oxvmm_machines_explain_what_they_need_before_starting() {
+    // Runs everywhere: the configuration is rejected before any hypervisor is touched.
+    let env = Env::new();
+    let (code, v) = env.json(&["version"]);
+    assert_eq!(code, 0);
+    if !v["engines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|e| e == "oxvmm")
+    {
+        eprintln!("oxvmm engine not available on this host; skipping");
+        return;
+    }
+    assert_eq!(
+        env.json(&["vm", "create", "--name", "nokernel", "--engine", "oxvmm"])
+            .0,
+        0
+    );
+    let (code, v) = env.json(&["vm", "start", "nokernel"]);
+    assert_eq!(
+        (code, v["error"]["code"].as_str()),
+        (10, Some("OXE-ENG-011")),
+        "{v}"
+    );
+    let (_, v) = env.json(&["vm", "show", "nokernel"]);
+    assert_eq!(v["summary"]["state"], "powered_off");
 }

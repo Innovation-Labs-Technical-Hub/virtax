@@ -76,7 +76,7 @@ enum VmCmd {
         #[arg(long)]
         folder: Option<PathBuf>,
         #[command(flatten)]
-        config: ConfigArgs,
+        config: Box<ConfigArgs>,
     },
     /// Change machine settings.
     Set {
@@ -84,7 +84,7 @@ enum VmCmd {
         #[arg(long)]
         name: Option<String>,
         #[command(flatten)]
-        config: ConfigArgs,
+        config: Box<ConfigArgs>,
         /// Fail if the machine changed since this etag (default: the current etag).
         #[arg(long)]
         etag: Option<String>,
@@ -152,6 +152,15 @@ struct ConfigArgs {
     /// Tag (repeatable; replaces the list).
     #[arg(long = "tag")]
     tags: Vec<String>,
+    /// Kernel for direct boot (oxvmm): bzImage or vmlinux. An empty value removes direct boot.
+    #[arg(long)]
+    kernel: Option<String>,
+    /// Initramfs for direct boot.
+    #[arg(long)]
+    initrd: Option<String>,
+    /// Extra kernel parameters for direct boot.
+    #[arg(long)]
+    cmdline: Option<String>,
 }
 
 #[derive(Args)]
@@ -380,6 +389,29 @@ fn config_and_mask(
         cfg.tags = c.tags;
         set("tags");
     }
+    // Paths are sent as given; make them absolute so they do not depend on the daemon's directory.
+    let absolute = |p: String| -> String {
+        let path = PathBuf::from(&p);
+        if p.is_empty() || path.is_absolute() {
+            p
+        } else {
+            std::env::current_dir()
+                .map(|d| d.join(path).to_string_lossy().into_owned())
+                .unwrap_or(p)
+        }
+    };
+    if let Some(v) = c.kernel {
+        cfg.boot_kernel = absolute(v);
+        set("boot_kernel");
+    }
+    if let Some(v) = c.initrd {
+        cfg.boot_initrd = absolute(v);
+        set("boot_initrd");
+    }
+    if let Some(v) = c.cmdline {
+        cfg.boot_cmdline = v;
+        set("boot_cmdline");
+    }
     Ok((cfg, mask))
 }
 
@@ -570,7 +602,7 @@ async fn run_vm(ctx: &Ctx, cmd: VmCmd) -> Result<()> {
             folder,
             config,
         } => {
-            let (mut cfg, _) = config_and_mask(Some(name), config)?;
+            let (mut cfg, _) = config_and_mask(Some(name), *config)?;
             cfg.display_name = cfg.display_name.trim().to_string();
             let m = ctx
                 .machines()
@@ -602,7 +634,7 @@ async fn run_vm(ctx: &Ctx, cmd: VmCmd) -> Result<()> {
             dry_run,
             at_shutdown,
         } => {
-            let (cfg, mask) = config_and_mask(name, config)?;
+            let (cfg, mask) = config_and_mask(name, *config)?;
             if mask.is_empty() {
                 return Err(CliError::usage(
                     "nothing to change; pass at least one setting such as --cpus",

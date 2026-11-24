@@ -19,7 +19,7 @@ use oxbox_api::v1::events_server::EventsServer;
 use oxbox_api::v1::machines_server::MachinesServer;
 use oxbox_api::v1::operations_server::OperationsServer;
 use oxbox_api::v1::runtime_server::RuntimeServer;
-use oxbox_engine::{Engine, MockEngine};
+use oxbox_engine::{Engine, MockEngine, OxvmmEngine};
 use oxbox_model::{EngineKind, OxeCode};
 use oxbox_store::{FolderLock, Registry, StoreError};
 use tokio::net::UnixListener;
@@ -41,6 +41,9 @@ struct Args {
     /// Duration of MockEngine start/stop operations.
     #[arg(long, env = "OXBOX_MOCK_LATENCY_MS", default_value_t = 400)]
     mock_latency_ms: u64,
+    /// The oxvmm executable (default: `oxvmm` next to oxboxd).
+    #[arg(long, env = "OXBOX_OXVMM_BIN")]
+    oxvmm_bin: Option<PathBuf>,
     /// Log as JSON lines.
     #[arg(long)]
     log_json: bool,
@@ -129,15 +132,27 @@ async fn main() -> anyhow::Result<()> {
             args.mock_latency_ms,
         ))));
     }
+    let oxvmm_bin = args.oxvmm_bin.unwrap_or_else(|| {
+        std::env::current_exe()
+            .map(|exe| exe.with_file_name("oxvmm"))
+            .unwrap_or_else(|_| PathBuf::from("oxvmm"))
+    });
+    match OxvmmEngine::host_check(&oxvmm_bin) {
+        Ok(()) => {
+            tracing::info!(binary = %oxvmm_bin.display(), "oxvmm engine enabled (KVM)");
+            engines.push(Arc::new(OxvmmEngine::new(oxvmm_bin)));
+        }
+        Err(reason) => tracing::warn!(%reason, "oxvmm engine disabled"),
+    }
     if engines.is_empty() {
         tracing::warn!("no engine enabled; machines can be listed but not created or started");
     }
-    let daemon = daemon::Daemon::new(
-        data_dir.clone(),
-        registry,
-        engines,
-        args.mock_engine.then_some(EngineKind::Mock),
-    );
+    let default_engine = if args.mock_engine {
+        EngineKind::Mock
+    } else {
+        EngineKind::Oxvmm
+    };
+    let daemon = daemon::Daemon::new(data_dir.clone(), registry, engines, Some(default_engine));
     daemon
         .reconcile()
         .await
