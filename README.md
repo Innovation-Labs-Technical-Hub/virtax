@@ -48,31 +48,27 @@ Not yet: the VirtualBox legacy engine (VBoxCAPI FFI), the console/framebuffer da
 
 ## Build and try it
 
-Only the pinned Rust toolchain is required (`protoc` is vendored).
+Only the pinned Rust toolchain is required (`protoc` is vendored). Common tasks are `just` recipes (`just` lists
+them; `make <recipe>` forwards to the same recipes, with arguments in `ARGS="..."`).
 
 ```sh
-cargo xtask ci                       # fmt check, lint policy, clippy -D warnings, all tests
+just doctor        # what this host can run: KVM, busybox-static, test guest, dev daemon
+just ci            # fmt check, lint policy, clippy -D warnings, all tests
+just guest         # pinned Ubuntu test kernel + busybox initramfs in .cache/guest
+just boot 4 512 virtax.poweroff   # boot it directly with virtax-vmm (cpus, MiB, kernel args)
+just kvm-test      # the tests that boot real guests on KVM
 
-cargo run -p virtaxd -- --mock-engine &   # simulated engine; data in ~/.local/share/virtax
-cargo run -p virtaxctl -- vm create --name web --os-type Ubuntu_64 --cpus 2 --memory 2048
-cargo run -p virtaxctl -- vm start web
-cargo run -p virtaxctl -- --json vm list
-cargo run -p virtaxctl -- vm set web --memory 4096 --dry-run   # shows when each change applies
+just dev-up        # background dev daemon: data in .cache/dev, socket in $XDG_RUNTIME_DIR/virtax-dev
+just demo          # create + start a KVM guest "demo" and show its console
+just ctl vm list   # any virtaxctl command against the dev daemon
+just events --since 0
+just ctl vm stop demo --force
+just dev-down      # dev-reset also deletes the dev data
 ```
 
-Boot a real guest on KVM (Linux x86_64, user in the `kvm` group, `busybox-static` installed):
-
-```sh
-cargo xtask guest-kernel                 # pinned Ubuntu kernel + busybox initramfs in .cache/guest
-cargo build -p virtax-vmm && cargo run -p virtaxd &
-cargo run -p virtaxctl -- vm create --name g --cpus 1 --memory 512 \
-  --kernel .cache/guest/vmlinuz --initrd .cache/guest/initramfs.cpio
-cargo run -p virtaxctl -- vm start g         # the test guest prints a marker and reboots, ending the VM
-cargo xtask kvm-test                     # the KVM boot tests
-```
-
-`VIRTAX_SOCKET` and `VIRTAX_DATA_DIR` override the socket and data locations. Unix socket paths must stay
-under 104 bytes.
+KVM needs Linux x86_64 with `/dev/kvm` read-write for your user and the `busybox-static` package for the test
+guest. `VIRTAX_SOCKET` and `VIRTAX_DATA_DIR` override the daemon's socket and data locations; Unix socket paths
+must stay under 104 bytes.
 
 ## End-to-end tests
 
