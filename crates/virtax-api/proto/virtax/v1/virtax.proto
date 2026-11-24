@@ -1,0 +1,276 @@
+// Virtax control-plane API, version 1.
+// Within v1 only additive changes are allowed; field numbers are never reused (mark them `reserved`).
+// Errors carry gRPC status codes; the VTX code is in the `vtx-code` response metadata and, for etag
+// conflicts, the current etag is in `vtx-etag`.
+syntax = "proto3";
+
+package virtax.v1;
+
+import "google/protobuf/field_mask.proto";
+
+// Read-model summary of a machine, served from the registry without calling the engine.
+message MachineSummary {
+  string id = 1;
+  string display_name = 2;
+  // powered_off | starting | running | paused | saving | saved | restoring | stopping |
+  // snapshotting | restoring_snapshot | aborted
+  string state = 3;
+  string os_type = 4;
+  repeated string groups = 5;
+  repeated string tags = 6;
+  uint64 memory_mib = 7;
+  uint32 cpu_count = 8;
+  // vbox-legacy | virtax-vmm | mock
+  string engine = 9;
+  uint32 snapshot_count = 10;
+  bool accessible = 11;
+  string error_code = 12;
+  // Changes queued until the machine powers off.
+  uint32 pending_change_count = 13;
+}
+
+// The editable configuration fields. `UpdateMachine` field-mask paths use these field names.
+message MachineConfig {
+  string display_name = 1;
+  string os_type = 2;
+  repeated string groups = 3;
+  repeated string tags = 4;
+  uint32 cpu_count = 5;
+  uint64 memory_mib = 6;
+  uint32 vram_mib = 7;
+  uint32 monitors = 8;
+  // bios | efi
+  string firmware = 9;
+  bool secure_boot = 10;
+  // Direct kernel boot (virtax-vmm). Empty boot_kernel means no [boot] table. Paths are relative to the
+  // machine folder unless absolute.
+  string boot_kernel = 11;
+  string boot_initrd = 12;
+  // Extra kernel parameters.
+  string boot_cmdline = 13;
+}
+
+message Machine {
+  // Resource name: machines/{uuid}
+  string name = 1;
+  // Opaque concurrency token; send it back on UpdateMachine.
+  string etag = 2;
+  MachineSummary summary = 3;
+  MachineConfig config = 4;
+  // The full `machine.toml` (read-only here).
+  string manifest_toml = 5;
+  string folder = 6;
+  // Changes queued until the machine powers off; applied before its next start.
+  repeated PendingChange pending_changes = 7;
+}
+
+message ListMachinesRequest {
+  // Optional exact-match filters.
+  string state = 1;
+  string group = 2;
+}
+
+message ListMachinesResponse {
+  repeated MachineSummary machines = 1;
+}
+
+message GetMachineRequest {
+  // machines/{uuid} or machines/{display_name}
+  string name = 1;
+}
+
+message CreateMachineRequest {
+  MachineConfig config = 1;
+  // Engine kind; empty selects the daemon default.
+  string engine = 2;
+  // Optional folder; defaults to <data dir>/machines/<uuid>.
+  string folder = 3;
+}
+
+enum ApplyMode {
+  APPLY_MODE_UNSPECIFIED = 0;
+  APPLY_MODE_LIVE = 1;
+  APPLY_MODE_NEXT_BOOT = 2;
+  APPLY_MODE_NEEDS_POWER_OFF = 3;
+}
+
+message FieldResult {
+  string path = 1;
+  ApplyMode apply_mode = 2;
+  repeated string issues = 3;
+  // True when the change was queued in pending_changes instead of applied now.
+  bool queued = 4;
+}
+
+// What to do with changes that need power-off while the machine is running.
+// Changes that take effect at the next boot are always queued on a running machine.
+enum ApplyPolicy {
+  // Refuse the whole update with FAILED_PRECONDITION (VTX-RT-002).
+  APPLY_POLICY_UNSPECIFIED = 0;
+  // Apply live fields now and queue the rest until the machine powers off.
+  APPLY_POLICY_QUEUE = 1;
+}
+
+message PendingChange {
+  // MachineConfig field name, as in update_mask.
+  string field_path = 1;
+  // The queued value as JSON.
+  string value_json = 2;
+  ApplyMode apply_mode = 3;
+  string created_at = 4;
+}
+
+message CancelPendingChangeRequest {
+  string name = 1;
+  string field_path = 2;
+}
+
+message UpdateMachineRequest {
+  string name = 1;
+  MachineConfig config = 2;
+  google.protobuf.FieldMask update_mask = 3;
+  string etag = 4;
+  // Validate and report per-field ApplyMode without changing anything.
+  bool validate_only = 5;
+  ApplyPolicy apply_policy = 6;
+}
+
+message UpdateMachineResponse {
+  Machine machine = 1;
+  repeated FieldResult field_results = 2;
+}
+
+message DeleteMachineRequest {
+  string name = 1;
+  // Also delete the machine folder (manifest and disks). Otherwise the folder is kept.
+  bool delete_files = 2;
+}
+
+message DeleteMachineResponse {}
+
+// Read and validate a manifest text without registering anything.
+message ValidateManifestRequest {
+  string manifest_toml = 1;
+}
+
+message ManifestIssue {
+  string path = 1;
+  string message = 2;
+  uint32 line = 3;
+  uint32 column = 4;
+}
+
+message ValidateManifestResponse {
+  repeated ManifestIssue issues = 1;
+}
+
+service Machines {
+  rpc ListMachines(ListMachinesRequest) returns (ListMachinesResponse);
+  rpc GetMachine(GetMachineRequest) returns (Machine);
+  rpc CreateMachine(CreateMachineRequest) returns (Machine);
+  rpc UpdateMachine(UpdateMachineRequest) returns (UpdateMachineResponse);
+  rpc DeleteMachine(DeleteMachineRequest) returns (DeleteMachineResponse);
+  rpc ValidateManifest(ValidateManifestRequest) returns (ValidateManifestResponse);
+  // Drop one queued change; returns the machine with its remaining queue.
+  rpc CancelPendingChange(CancelPendingChangeRequest) returns (Machine);
+}
+
+message OperationError {
+  string code = 1;
+  string message = 2;
+  string message_vi = 3;
+  string hint = 4;
+  string detail = 5;
+}
+
+message Operation {
+  // operations/{uuid}
+  string name = 1;
+  // start | stop
+  string kind = 2;
+  // Resource the operation acts on, e.g. machines/{uuid}
+  string target = 3;
+  // queued | running | cancelling | succeeded | failed | cancelled
+  string state = 4;
+  uint32 percent = 5;
+  string step = 6;
+  bool done = 7;
+  bool cancellable = 8;
+  OperationError error = 9;
+  string started_at = 10;
+  string finished_at = 11;
+}
+
+message StartRequest {
+  string name = 1;
+  bool headless = 2;
+}
+
+message StopRequest {
+  string name = 1;
+  // Hard power off instead of an ACPI shutdown request.
+  bool force = 2;
+}
+
+service Runtime {
+  rpc Start(StartRequest) returns (Operation);
+  rpc Stop(StopRequest) returns (Operation);
+}
+
+message GetOperationRequest { string name = 1; }
+message ListOperationsRequest { uint32 page_size = 1; }
+message ListOperationsResponse { repeated Operation operations = 1; }
+message WatchOperationRequest { string name = 1; }
+message CancelOperationRequest { string name = 1; }
+
+service Operations {
+  rpc GetOperation(GetOperationRequest) returns (Operation);
+  rpc ListOperations(ListOperationsRequest) returns (ListOperationsResponse);
+  // Streams the current state, then every change, ending after the terminal state.
+  rpc WatchOperation(WatchOperationRequest) returns (stream Operation);
+  rpc CancelOperation(CancelOperationRequest) returns (Operation);
+}
+
+// A by-value change notification. `seq` is global, gap-free per daemon registry and never reused,
+// so a client that stores the last `seq` it processed can resume exactly where it stopped.
+message Event {
+  uint64 seq = 1;
+  string ts = 2;
+  // machines/{uuid} | operations/{uuid}
+  string resource = 3;
+  // machine.created | machine.updated | machine.state_changed | machine.deleted |
+  // operation.updated | operation.finished
+  string kind = 4;
+  // Event-specific JSON object; see docs/events.md.
+  string payload_json = 5;
+}
+
+message WatchEventsRequest {
+  // Replay events with seq > since_seq, then follow live. Unset: live events only.
+  // A cursor older than the journal's retention fails with OUT_OF_RANGE (VTX-API-410).
+  optional uint64 since_seq = 1;
+  // Only resources starting with one of these prefixes, e.g. "machines/". Empty: all.
+  repeated string resource_prefixes = 2;
+  // Only these kinds; "machine" matches every "machine.*" kind. Empty: all.
+  repeated string kinds = 3;
+}
+
+service Events {
+  rpc Watch(WatchEventsRequest) returns (stream Event);
+}
+
+message GetVersionRequest {}
+
+message VersionInfo {
+  string daemon_version = 1;
+  string api_version = 2;
+  string manifest_schema = 3;
+  uint32 registry_schema = 4;
+  repeated string engines = 5;
+  // Sequence number of the newest event; pass it as since_seq to watch from "now" resumably.
+  uint64 last_event_seq = 6;
+}
+
+service Daemon {
+  rpc GetVersion(GetVersionRequest) returns (VersionInfo);
+}

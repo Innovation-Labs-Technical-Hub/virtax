@@ -821,139 +821,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
-name = "oxbox-api"
-version = "0.1.0"
-dependencies = [
- "dirs",
- "hyper-util",
- "prost",
- "prost-build",
- "prost-types",
- "protoc-bin-vendored",
- "tokio",
- "tonic",
- "tonic-prost",
- "tonic-prost-build",
- "tower",
-]
-
-[[package]]
-name = "oxbox-engine"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "futures",
- "oxbox-model",
- "tempfile",
- "thiserror",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "uuid",
-]
-
-[[package]]
-name = "oxbox-model"
-version = "0.1.0"
-dependencies = [
- "schemars",
- "serde",
- "serde_json",
- "thiserror",
- "toml",
- "uuid",
-]
-
-[[package]]
-name = "oxbox-store"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "dirs",
- "oxbox-model",
- "rusqlite",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
- "uuid",
-]
-
-[[package]]
-name = "oxboxd"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "clap",
- "futures",
- "oxbox-api",
- "oxbox-engine",
- "oxbox-model",
- "oxbox-store",
- "prost-types",
- "rustix",
- "serde_json",
- "tempfile",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "tonic",
- "tracing",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
-name = "oxctl"
-version = "0.1.0"
-dependencies = [
- "clap",
- "oxbox-api",
- "oxbox-model",
- "prost-types",
- "serde_json",
- "tempfile",
- "tokio",
- "tonic",
-]
-
-[[package]]
-name = "oxvmm"
-version = "0.1.0"
-dependencies = [
- "clap",
- "oxvmm-core",
- "tempfile",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "oxvmm-core"
-version = "0.1.0"
-dependencies = [
- "linux-loader",
- "oxvmm-hv",
- "thiserror",
- "tracing",
- "vm-memory",
- "vm-superio",
- "vmm-sys-util",
-]
-
-[[package]]
-name = "oxvmm-hv"
-version = "0.1.0"
-dependencies = [
- "kvm-bindings",
- "kvm-ioctls",
- "thiserror",
- "vm-memory",
- "vmm-sys-util",
-]
-
-[[package]]
 name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1820,6 +1687,139 @@ name = "vcpkg"
 version = "0.2.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
+
+[[package]]
+name = "virtax-api"
+version = "0.1.0"
+dependencies = [
+ "dirs",
+ "hyper-util",
+ "prost",
+ "prost-build",
+ "prost-types",
+ "protoc-bin-vendored",
+ "tokio",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
+ "tower",
+]
+
+[[package]]
+name = "virtax-engine"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "uuid",
+ "virtax-model",
+]
+
+[[package]]
+name = "virtax-model"
+version = "0.1.0"
+dependencies = [
+ "schemars",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "toml",
+ "uuid",
+]
+
+[[package]]
+name = "virtax-store"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "dirs",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "uuid",
+ "virtax-model",
+]
+
+[[package]]
+name = "virtax-vmm"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "tempfile",
+ "tracing",
+ "tracing-subscriber",
+ "virtax-vmm-core",
+]
+
+[[package]]
+name = "virtax-vmm-core"
+version = "0.1.0"
+dependencies = [
+ "linux-loader",
+ "thiserror",
+ "tracing",
+ "virtax-vmm-hv",
+ "vm-memory",
+ "vm-superio",
+ "vmm-sys-util",
+]
+
+[[package]]
+name = "virtax-vmm-hv"
+version = "0.1.0"
+dependencies = [
+ "kvm-bindings",
+ "kvm-ioctls",
+ "thiserror",
+ "vm-memory",
+ "vmm-sys-util",
+]
+
+[[package]]
+name = "virtaxctl"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "prost-types",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tonic",
+ "virtax-api",
+ "virtax-model",
+]
+
+[[package]]
+name = "virtaxd"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "futures",
+ "prost-types",
+ "rustix",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tonic",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "virtax-api",
+ "virtax-engine",
+ "virtax-model",
+ "virtax-store",
+]
 
 [[package]]
 name = "vm-memory"

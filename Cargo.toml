@@ -7,13 +7,13 @@ version = "0.1.0"
 edition = "2024"
 license = "GPL-3.0-or-later"
 rust-version = "1.89"
-repository = "https://github.com/innovation-labs/oxbox"
+repository = "https://github.com/innovation-labs/virtax"
 
 [workspace.dependencies]
-oxbox-model = { path = "crates/oxbox-model" }
-oxbox-store = { path = "crates/oxbox-store" }
-oxbox-engine = { path = "crates/oxbox-engine" }
-oxbox-api = { path = "crates/oxbox-api" }
+virtax-model = { path = "crates/virtax-model" }
+virtax-store = { path = "crates/virtax-store" }
+virtax-engine = { path = "crates/virtax-engine" }
+virtax-api = { path = "crates/virtax-api" }
 
 anyhow = "1"
 async-trait = "0.1"

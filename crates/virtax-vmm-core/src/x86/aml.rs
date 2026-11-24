@@ -1,0 +1,157 @@
+//! The few AML (ACPI Machine Language) constructs virtax-vmm's DSDT needs (ACPI 6.5 §20).
+
+/// PkgLength: the encoded length counts itself plus `body_len` bytes.
+pub fn pkg_length(body_len: usize) -> Vec<u8> {
+    let one = body_len + 1;
+    if one < 0x40 {
+        return vec![one as u8];
+    }
+    let two = body_len + 2;
+    if two < 0x1000 {
+        return vec![0x40 | (two & 0xf) as u8, (two >> 4) as u8];
+    }
+    let three = body_len + 3;
+    assert!(three < 0x10_0000, "AML package too large");
+    vec![
+        0x80 | (three & 0xf) as u8,
+        (three >> 4) as u8,
+        (three >> 12) as u8,
+    ]
+}
+
+fn name_seg(name: &str) -> [u8; 4] {
+    let b = name.as_bytes();
+    assert!(
+        b.len() == 4
+            && b.iter()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || *c == b'_'),
+        "bad name {name}"
+    );
+    [b[0], b[1], b[2], b[3]]
+}
+
+fn with_pkg(op: &[u8], body: Vec<u8>) -> Vec<u8> {
+    let mut out = op.to_vec();
+    out.extend(pkg_length(body.len()));
+    out.extend(body);
+    out
+}
+
+/// `Name (NAME, value)`.
+pub fn name(n: &str, value: Vec<u8>) -> Vec<u8> {
+    let mut out = vec![0x08];
+    out.extend(name_seg(n));
+    out.extend(value);
+    out
+}
+
+/// `Scope (NAME) { children }`.
+pub fn scope(n: &str, children: Vec<u8>) -> Vec<u8> {
+    let mut body = name_seg(n).to_vec();
+    body.extend(children);
+    with_pkg(&[0x10], body)
+}
+
+/// `Device (NAME) { children }`.
+pub fn device(n: &str, children: Vec<u8>) -> Vec<u8> {
+    let mut body = name_seg(n).to_vec();
+    body.extend(children);
+    with_pkg(&[0x5b, 0x82], body)
+}
+
+/// `Package { items }` of byte-sized integers.
+pub fn byte_package(items: &[u8]) -> Vec<u8> {
+    let mut body = vec![items.len() as u8];
+    for i in items {
+        body.extend(integer(u32::from(*i)));
+    }
+    with_pkg(&[0x12], body)
+}
+
+/// The shortest encoding of an integer constant.
+pub fn integer(v: u32) -> Vec<u8> {
+    match v {
+        0 => vec![0x00],
+        1 => vec![0x01],
+        2..=0xff => vec![0x0a, v as u8],
+        0x100..=0xffff => {
+            let mut out = vec![0x0b];
+            out.extend((v as u16).to_le_bytes());
+            out
+        }
+        _ => {
+            let mut out = vec![0x0c];
+            out.extend(v.to_le_bytes());
+            out
+        }
+    }
+}
+
+/// `EISAID ("PNP0501")`: a compressed vendor + product ID as a DWord constant.
+pub fn eisa_id(id: &str) -> Vec<u8> {
+    let b = id.as_bytes();
+    assert!(b.len() == 7, "EISA IDs are 3 letters and 4 hex digits");
+    let vendor =
+        (u16::from(b[0] - 0x40) << 10) | (u16::from(b[1] - 0x40) << 5) | u16::from(b[2] - 0x40);
+    let product = u16::from_str_radix(&id[3..], 16).expect("hex product ID");
+    let mut out = vec![0x0c];
+    out.extend(vendor.to_be_bytes());
+    out.extend(product.to_be_bytes());
+    out
+}
+
+/// `ResourceTemplate () { IO (Decode16, port, port, 1, len) IRQNoFlags () { irq } }`.
+pub fn io_irq_resources(port: u16, len: u8, irq: u8) -> Vec<u8> {
+    assert!(irq < 16, "IRQNoFlags covers ISA IRQs 0-15");
+    let mut res = vec![0x47, 0x01];
+    res.extend(port.to_le_bytes());
+    res.extend(port.to_le_bytes());
+    res.extend([0x01, len]);
+    res.push(0x22); // IRQ descriptor without flags: edge-triggered, active-high
+    res.extend((1u16 << irq).to_le_bytes());
+    res.extend([0x79, 0x00]); // end tag, checksum not used
+    let mut body = integer(res.len() as u32);
+    body.extend(res);
+    with_pkg(&[0x11], body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pkg_length_boundaries() {
+        assert_eq!(pkg_length(4), vec![5]);
+        assert_eq!(pkg_length(62), vec![63]);
+        assert_eq!(pkg_length(62 + 1), vec![0x40 | (65 & 0xf), (65 >> 4) as u8]);
+    }
+
+    #[test]
+    fn eisa_id_matches_the_well_known_value() {
+        // PNP0501 is 0x0105D041 as a little-endian DWord.
+        assert_eq!(eisa_id("PNP0501"), vec![0x0c, 0x41, 0xd0, 0x05, 0x01]);
+    }
+
+    #[test]
+    fn s5_package_matches_hand_assembled_aml() {
+        let aml = name("_S5_", byte_package(&[5, 0]));
+        assert_eq!(
+            aml,
+            vec![
+                0x08, b'_', b'S', b'5', b'_', 0x12, 0x05, 0x02, 0x0a, 0x05, 0x00
+            ]
+        );
+    }
+
+    #[test]
+    fn com1_resources() {
+        let buf = io_irq_resources(0x3f8, 8, 4);
+        // BufferOp, PkgLength, BufferSize (13), IO descriptor, IRQ descriptor, end tag.
+        assert_eq!(&buf[..4], &[0x11, 0x10, 0x0a, 13]);
+        assert_eq!(
+            &buf[4..12],
+            &[0x47, 0x01, 0xf8, 0x03, 0xf8, 0x03, 0x01, 0x08]
+        );
+        assert_eq!(&buf[12..], &[0x22, 0x10, 0x00, 0x79, 0x00]);
+    }
+}

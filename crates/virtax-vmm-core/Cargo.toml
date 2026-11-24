@@ -1,0 +1,19 @@
+[package]
+name = "virtax-vmm-core"
+description = "virtax-vmm: guest memory, x86_64 boot, legacy devices and the vCPU run loop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+virtax-vmm-hv = { path = "../virtax-vmm-hv" }
+linux-loader = { version = "0.14", features = ["bzimage", "elf"] }
+thiserror.workspace = true
+tracing.workspace = true
+vm-memory = { version = "0.18", features = ["backend-mmap"] }
+vm-superio = "0.8"
+vmm-sys-util = "0.15"
+
+[lints]
+workspace = true

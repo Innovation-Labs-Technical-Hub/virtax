@@ -9,10 +9,10 @@ const USAGE: &str = "usage: cargo xtask <command>
 
 commands:
   ci [--quick]   fmt check, workspace lint policy, clippy -D warnings, tests (--quick skips clippy)
-  e2e [filter]   run the oxctl end-to-end tests (optionally filter by test name)
+  e2e [filter]   run the virtaxctl end-to-end tests (optionally filter by test name)
   guest-kernel   fetch the pinned test kernel and build the busybox initramfs (.cache/guest)
   kvm-test       run the tests that boot real guests on KVM (needs /dev/kvm and guest-kernel)
-  schema         write the machine.toml JSON Schema to schemas/oxbox.machine.v1.json";
+  schema         write the machine.toml JSON Schema to schemas/virtax.machine.v1.json";
 
 fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -37,7 +37,7 @@ fn cargo(args: &[&str]) -> Result<(), String> {
 }
 
 /// Crates allowed to use `unsafe`. They must deny undocumented unsafe blocks instead.
-const UNSAFE_ALLOWED: &[&str] = &["crates/oxvmm-hv"];
+const UNSAFE_ALLOWED: &[&str] = &["crates/virtax-vmm-hv"];
 
 /// Every package must inherit the workspace lints, which forbid `unsafe_code`, except the crates in
 /// `UNSAFE_ALLOWED`, which must require a `SAFETY:` comment on every unsafe block.
@@ -103,7 +103,14 @@ fn ci(quick: bool) -> Result<(), String> {
 }
 
 fn e2e(args: &[String]) -> Result<(), String> {
-    let mut command = vec!["test", "--locked", "--package", "oxctl", "--test", "e2e"];
+    let mut command = vec![
+        "test",
+        "--locked",
+        "--package",
+        "virtaxctl",
+        "--test",
+        "e2e",
+    ];
     command.push("--");
     command.extend(args.iter().map(String::as_str));
     cargo(&command)
@@ -122,14 +129,22 @@ fn schema() -> Result<(), String> {
     std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
     let output = Command::new(cargo)
-        .args(["run", "--quiet", "--package", "oxctl", "--", "vm", "schema"])
+        .args([
+            "run",
+            "--quiet",
+            "--package",
+            "virtaxctl",
+            "--",
+            "vm",
+            "schema",
+        ])
         .current_dir(root())
         .output()
         .map_err(|e| e.to_string())?;
     if !output.status.success() {
         return Err(String::from_utf8_lossy(&output.stderr).into_owned());
     }
-    let path = out.join("oxbox.machine.v1.json");
+    let path = out.join("virtax.machine.v1.json");
     std::fs::write(&path, output.stdout).map_err(|e| e.to_string())?;
     eprintln!("wrote {}", path.display());
     Ok(())

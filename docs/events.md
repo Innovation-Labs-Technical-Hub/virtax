@@ -1,7 +1,7 @@
 # Events
 
-`oxboxd` records every change as a by-value event in the registry's `event_journal` and broadcasts it to
-watchers (`Events.Watch` in `crates/oxbox-api/proto/oxbox/v1/oxbox.proto`, `oxctl events watch` on the CLI).
+`virtaxd` records every change as a by-value event in the registry's `event_journal` and broadcasts it to
+watchers (`Events.Watch` in `crates/virtax-api/proto/virtax/v1/virtax.proto`, `virtaxctl events watch` on the CLI).
 
 ## Delivery guarantees
 
@@ -11,9 +11,9 @@ watchers (`Events.Watch` in `crates/oxbox-api/proto/oxbox/v1/oxbox.proto`, `oxct
   applied). A watcher that falls behind the live buffer (1,024 events) catches up from the journal, so slow
   clients cost journal reads rather than daemon memory.
 - Retention is 100,000 events or 24 hours, whichever is smaller. A cursor outside the journal fails with
-  `OUT_OF_RANGE` / `OXE-API-410`. The client should reload state (`ListMachines`), then watch from
+  `OUT_OF_RANGE` / `VTX-API-410`. The client should reload state (`ListMachines`), then watch from
   `VersionInfo.last_event_seq`.
-- When the daemon stops, open streams end. `oxctl events watch` reconnects with backoff (100 ms doubling to
+- When the daemon stops, open streams end. `virtaxctl events watch` reconnects with backoff (100 ms doubling to
   500 ms) and resumes from the last `seq` it printed.
 
 ## Filters
@@ -32,12 +32,12 @@ watchers (`Events.Watch` in `crates/oxbox-api/proto/oxbox/v1/oxbox.proto`, `oxct
 | `operation.updated` | `operations/{id}` | `{"kind", "target", "state", "percent", "step", "done": false, "error": null}`. Every state change is recorded; progress ticks are recorded at most 4 times per second per operation |
 | `operation.finished` | `operations/{id}` | The same shape, with `done: true` and `error` set on failure or cancellation |
 
-`MachineSummary` uses the field names in `crates/oxbox-model/src/summary.rs`.
+`MachineSummary` uses the field names in `crates/virtax-model/src/summary.rs`.
 
 ## CLI
 
 ```sh
-oxctl events watch                         # from now
-oxctl --json events watch --since 0        # everything retained, as NDJSON
-oxctl events watch --kind machine --resource machines/ --count 10
+virtaxctl events watch                         # from now
+virtaxctl --json events watch --since 0        # everything retained, as NDJSON
+virtaxctl events watch --kind machine --resource machines/ --count 10
 ```

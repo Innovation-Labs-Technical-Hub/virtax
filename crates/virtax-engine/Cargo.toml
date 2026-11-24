@@ -1,0 +1,23 @@
+[package]
+name = "virtax-engine"
+description = "The Engine trait (strangler seam) and the deterministic MockEngine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+virtax-model.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+tokio-util.workspace = true
+uuid.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
