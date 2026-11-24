@@ -3,7 +3,9 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 use oxbox_api::v1 as pb;
@@ -14,12 +16,13 @@ use oxbox_model::{
 use oxbox_store::{
     FolderLock, OperationRecord, ReadOutcome, Registry, StoreError, read_manifest, write_manifest,
 };
-use tokio::sync::watch;
+use tokio::sync::{broadcast, watch};
 use tokio_util::sync::CancellationToken;
 use tonic::Code;
 use uuid::Uuid;
 
 use crate::error::{ApiError, ApiResult};
+use crate::events::{BROADCAST_BUFFER, operation_payload, summary_payload};
 
 /// API field-mask path → manifest field path.
 pub const MASK_PATHS: &[(&str, &str)] = &[
@@ -35,16 +38,23 @@ pub const MASK_PATHS: &[(&str, &str)] = &[
     ("secure_boot", "platform.secure_boot"),
 ];
 
-const FINISHED_OP_RETENTION: std::time::Duration = std::time::Duration::from_secs(300);
+const FINISHED_OP_RETENTION: Duration = Duration::from_secs(300);
+/// Progress events per operation are journaled at most this often (state changes always are).
+const PROGRESS_EVENT_INTERVAL: Duration = Duration::from_millis(250);
 
 struct LiveOp {
     tx: watch::Sender<pb::Operation>,
     cancel: CancellationToken,
+    last_progress_event: Option<Instant>,
 }
 
 pub struct Daemon {
     data_dir: PathBuf,
-    registry: Mutex<Registry>,
+    pub(crate) registry: Mutex<Registry>,
+    pub(crate) events: broadcast::Sender<pb::Event>,
+    pub(crate) appended: AtomicU64,
+    /// Cancelled when the daemon stops; ends every open watch stream so shutdown is not blocked.
+    pub shutdown: CancellationToken,
     engines: HashMap<EngineKind, Arc<dyn Engine>>,
     default_engine: Option<EngineKind>,
     folder_locks: Mutex<HashMap<Uuid, FolderLock>>,
@@ -224,6 +234,9 @@ impl Daemon {
         Arc::new(Self {
             data_dir,
             registry: Mutex::new(registry),
+            events: broadcast::channel(BROADCAST_BUFFER).0,
+            appended: AtomicU64::new(0),
+            shutdown: CancellationToken::new(),
             engines,
             default_engine,
             folder_locks: Mutex::new(HashMap::new()),
@@ -328,7 +341,6 @@ impl Daemon {
                         error_code: notice.map(|c| c.code.to_string()),
                         ..MachineSummary::from_manifest(&manifest, state)
                     };
-                    let mut reg = self.registry.lock().unwrap();
                     let changed_outside = fresh.name != summary.name
                         || fresh.groups != summary.groups
                         || fresh.tags != summary.tags
@@ -337,9 +349,20 @@ impl Daemon {
                         || fresh.os_type != summary.os_type;
                     if changed_outside {
                         tracing::info!(vm = %row.id, "manifest changed outside oxboxd; re-imported");
-                        reg.update_machine(&manifest, row.config_rev, &fresh)?;
+                        self.registry.lock().unwrap().update_machine(
+                            &manifest,
+                            row.config_rev,
+                            &fresh,
+                        )?;
                     } else {
-                        reg.set_summary(row.id, &fresh)?;
+                        self.registry.lock().unwrap().set_summary(row.id, &fresh)?;
+                    }
+                    if changed_outside || fresh.error_code.is_some() {
+                        self.emit(
+                            &format!("machines/{}", row.id),
+                            "machine.updated",
+                            summary_payload(&fresh),
+                        );
                     }
                 }
                 Err(e) => {
@@ -350,6 +373,11 @@ impl Daemon {
                         .lock()
                         .unwrap()
                         .set_summary(row.id, &summary)?;
+                    self.emit(
+                        &format!("machines/{}", row.id),
+                        "machine.updated",
+                        summary_payload(&summary),
+                    );
                 }
             }
         }
@@ -398,15 +426,31 @@ impl Daemon {
     }
 
     fn record_state(&self, id: Uuid, state: MachineState) {
-        let mut reg = self.registry.lock().unwrap();
-        if let Ok(Some(row)) = reg.get_machine(id)
-            && let Some(mut s) = row.summary
-            && s.state != state
-        {
-            s.state = state;
-            if let Err(e) = reg.set_summary(id, &s) {
-                tracing::warn!(vm = %id, error = %e, "failed to update read model");
+        let changed = {
+            let mut reg = self.registry.lock().unwrap();
+            match reg.get_machine(id) {
+                Ok(Some(row)) => match row.summary {
+                    Some(mut s) if s.state != state => {
+                        s.state = state;
+                        match reg.set_summary(id, &s) {
+                            Ok(()) => true,
+                            Err(e) => {
+                                tracing::warn!(vm = %id, error = %e, "failed to update read model");
+                                false
+                            }
+                        }
+                    }
+                    _ => false,
+                },
+                _ => false,
             }
+        };
+        if changed {
+            self.emit(
+                &format!("machines/{id}"),
+                "machine.state_changed",
+                serde_json::json!({ "state": state }),
+            );
         }
     }
 
@@ -516,6 +560,11 @@ impl Daemon {
         engine.register(&m).await?;
         self.folder_locks.lock().unwrap().insert(m.id, lock);
         tracing::info!(vm = %m.id, name = %m.name, folder = %folder.display(), "machine created");
+        self.emit(
+            &format!("machines/{}", m.id),
+            "machine.created",
+            summary_payload(&summary),
+        );
         self.get(&m.id.to_string()).await
     }
 
@@ -610,6 +659,10 @@ impl Daemon {
             .unwrap()
             .update_machine(&manifest, row.config_rev, &summary)?;
         drop(_serialized);
+        let mut payload = summary_payload(&summary);
+        payload["etag"] = (row.config_rev + 1).to_string().into();
+        payload["changed"] = paths.clone().into();
+        self.emit(&format!("machines/{}", row.id), "machine.updated", payload);
         Ok(UpdateOutcome {
             machine: self.get(&row.id.to_string()).await?,
             field_results: results,
@@ -633,6 +686,11 @@ impl Daemon {
             remove_machine_folder(&row.folder)?;
         }
         tracing::info!(vm = %row.id, delete_files, "machine deleted");
+        self.emit(
+            &format!("machines/{}", row.id),
+            "machine.deleted",
+            serde_json::json!({ "files_deleted": delete_files }),
+        );
         Ok(())
     }
 
@@ -716,6 +774,7 @@ impl Daemon {
         {
             tracing::warn!(op = %name, error = %e, "failed to persist operation");
         }
+        let queued = operation_payload(&op);
         let (tx, _) = watch::channel(op);
         let cancel = CancellationToken::new();
         self.ops.lock().unwrap().insert(
@@ -723,17 +782,16 @@ impl Daemon {
             LiveOp {
                 tx,
                 cancel: cancel.clone(),
+                last_progress_event: None,
             },
         );
+        self.emit(&name, "operation.updated", queued);
         let me = Arc::downgrade(self);
         let progress_name = name.clone();
         let handle = OpHandle::new(
             move |percent, step| {
                 if let Some(me) = me.upgrade() {
-                    me.set_op_quiet(&progress_name, |o| {
-                        o.percent = percent;
-                        o.step = step.to_string();
-                    });
+                    me.op_progress(&progress_name, percent, step);
                 }
             },
             cancel,
@@ -741,7 +799,30 @@ impl Daemon {
         (name, handle)
     }
 
-    /// Update a live operation and broadcast it, without persisting (used for progress ticks).
+    /// Progress tick: always visible to WatchOperation; journaled as an event at a bounded rate.
+    fn op_progress(&self, name: &str, percent: u32, step: &str) {
+        let op = {
+            let mut ops = self.ops.lock().unwrap();
+            let Some(live) = ops.get_mut(name) else {
+                return;
+            };
+            live.tx.send_modify(|o| {
+                o.percent = percent;
+                o.step = step.to_string();
+            });
+            let due = live
+                .last_progress_event
+                .is_none_or(|t| t.elapsed() >= PROGRESS_EVENT_INTERVAL);
+            if !due {
+                return;
+            }
+            live.last_progress_event = Some(Instant::now());
+            live.tx.borrow().clone()
+        };
+        self.emit(name, "operation.updated", operation_payload(&op));
+    }
+
+    /// Update a live operation for WatchOperation, without persisting or journaling.
     fn set_op_quiet(
         &self,
         name: &str,
@@ -753,16 +834,25 @@ impl Daemon {
         Some(live.tx.borrow().clone())
     }
 
+    /// A state change: persist it and journal an event.
     fn set_op(&self, name: &str, f: impl FnOnce(&mut pb::Operation)) {
-        if let Some(op) = self.set_op_quiet(name, f)
-            && let Err(e) = self
-                .registry
-                .lock()
-                .unwrap()
-                .upsert_operation(&op_to_record(&op))
+        let Some(op) = self.set_op_quiet(name, f) else {
+            return;
+        };
+        if let Err(e) = self
+            .registry
+            .lock()
+            .unwrap()
+            .upsert_operation(&op_to_record(&op))
         {
             tracing::warn!(op = %name, error = %e, "failed to persist operation");
         }
+        let kind = if op.done {
+            "operation.finished"
+        } else {
+            "operation.updated"
+        };
+        self.emit(name, kind, operation_payload(&op));
     }
 
     fn finish_op(self: &Arc<Self>, name: &str, result: ApiResult<()>) {
@@ -857,12 +947,11 @@ fn remove_machine_folder(folder: &Path) -> ApiResult<()> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use oxbox_engine::MockEngine;
-    use std::time::Duration;
 
-    fn daemon(dir: &Path) -> Arc<Daemon> {
+    pub(crate) fn daemon(dir: &Path) -> Arc<Daemon> {
         let reg = Registry::open(&dir.join("registry.db")).unwrap();
         let engine: Arc<dyn Engine> = Arc::new(MockEngine::new(Duration::from_millis(20)));
         Daemon::new(dir.to_path_buf(), reg, vec![engine], None)

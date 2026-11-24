@@ -77,6 +77,16 @@ pub struct OperationRecord {
     pub result: Option<String>,
 }
 
+/// One entry of the event journal: a by-value event with its global sequence number.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EventRecord {
+    pub seq: u64,
+    pub ts: String,
+    pub resource: String,
+    pub kind: String,
+    pub payload: String,
+}
+
 pub struct Registry {
     conn: Connection,
 }
@@ -406,6 +416,83 @@ impl Registry {
     }
 }
 
+impl Registry {
+    /// Append an event; returns it with its assigned `seq`.
+    pub fn append_event(
+        &mut self,
+        resource: &str,
+        kind: &str,
+        payload: &str,
+    ) -> Result<EventRecord, StoreError> {
+        let ts = now();
+        self.conn.execute(
+            "INSERT INTO event_journal(ts, resource, type, payload) VALUES (?1, ?2, ?3, ?4)",
+            params![ts, resource, kind, payload.as_bytes()],
+        )?;
+        Ok(EventRecord {
+            seq: self.conn.last_insert_rowid() as u64,
+            ts,
+            resource: resource.into(),
+            kind: kind.into(),
+            payload: payload.into(),
+        })
+    }
+
+    /// Events with `seq > after`, oldest first.
+    pub fn events_after(&self, after: u64, limit: u32) -> Result<Vec<EventRecord>, StoreError> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT seq, ts, resource, type, payload FROM event_journal WHERE seq > ?1 ORDER BY seq LIMIT ?2",
+        )?;
+        let rows = stmt
+            .query_map(params![after as i64, limit], |r| {
+                let payload: Vec<u8> = r.get::<_, Option<Vec<u8>>>(4)?.unwrap_or_default();
+                Ok(EventRecord {
+                    seq: r.get::<_, i64>(0)? as u64,
+                    ts: r.get(1)?,
+                    resource: r.get(2)?,
+                    kind: r.get(3)?,
+                    payload: String::from_utf8_lossy(&payload).into_owned(),
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// `(oldest retained seq, last assigned seq)`. With an empty journal the oldest is `last + 1`.
+    /// The last seq survives trimming because AUTOINCREMENT never reuses numbers.
+    pub fn event_bounds(&self) -> Result<(u64, u64), StoreError> {
+        let last: i64 = self
+            .conn
+            .query_row(
+                "SELECT seq FROM sqlite_sequence WHERE name = 'event_journal'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(0);
+        let oldest: Option<i64> =
+            self.conn
+                .query_row("SELECT MIN(seq) FROM event_journal", [], |r| r.get(0))?;
+        Ok((oldest.unwrap_or(last + 1) as u64, last as u64))
+    }
+
+    /// Keep at most `max_events` events, none older than `max_age`. Returns how many were removed.
+    pub fn trim_events(
+        &mut self,
+        max_events: u64,
+        max_age: std::time::Duration,
+    ) -> Result<usize, StoreError> {
+        let (_, last) = self.event_bounds()?;
+        let cutoff = chrono::Utc::now()
+            - chrono::Duration::from_std(max_age).unwrap_or(chrono::Duration::MAX);
+        let cutoff = cutoff.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        Ok(self.conn.execute(
+            "DELETE FROM event_journal WHERE seq <= ?1 OR ts < ?2",
+            params![last.saturating_sub(max_events) as i64, cutoff],
+        )?)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -470,6 +557,42 @@ mod tests {
         assert_eq!(row.summary.unwrap().groups, vec!["/lab".to_string()]);
         reg.delete_machine(m.id).unwrap();
         assert!(reg.list_machines().unwrap().is_empty());
+    }
+
+    #[test]
+    fn event_journal_append_read_and_trim() {
+        let mut reg = Registry::open_in_memory().unwrap();
+        assert_eq!(reg.event_bounds().unwrap(), (1, 0));
+        for i in 0..10 {
+            let e = reg
+                .append_event("machines/x", "machine.updated", &format!("{{\"i\":{i}}}"))
+                .unwrap();
+            assert_eq!(e.seq, i + 1);
+        }
+        let after = reg.events_after(7, 100).unwrap();
+        assert_eq!(
+            after.iter().map(|e| e.seq).collect::<Vec<_>>(),
+            vec![8, 9, 10]
+        );
+        assert_eq!(after[0].payload, "{\"i\":7}");
+
+        assert_eq!(
+            reg.trim_events(4, std::time::Duration::from_secs(3600))
+                .unwrap(),
+            6
+        );
+        assert_eq!(reg.event_bounds().unwrap(), (7, 10));
+        assert_eq!(
+            reg.trim_events(0, std::time::Duration::from_secs(3600))
+                .unwrap(),
+            4
+        );
+        assert_eq!(
+            reg.event_bounds().unwrap(),
+            (11, 10),
+            "numbering continues after a full trim"
+        );
+        assert_eq!(reg.append_event("r", "k", "{}").unwrap().seq, 11);
     }
 
     #[test]

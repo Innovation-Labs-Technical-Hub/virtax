@@ -11,10 +11,12 @@ mod output;
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::Duration;
 
 use clap::{Args, Parser, Subcommand};
 use oxbox_api::v1 as pb;
 use oxbox_api::v1::daemon_client::DaemonClient;
+use oxbox_api::v1::events_client::EventsClient;
 use oxbox_api::v1::machines_client::MachinesClient;
 use oxbox_api::v1::operations_client::OperationsClient;
 use oxbox_api::v1::runtime_client::RuntimeClient;
@@ -44,6 +46,9 @@ enum Cmd {
     /// Long-running operations.
     #[command(subcommand)]
     Ops(OpsCmd),
+    /// Change events.
+    #[command(subcommand)]
+    Events(EventsCmd),
     /// Client, daemon, API and schema versions.
     Version,
 }
@@ -153,6 +158,25 @@ struct WaitArgs {
 }
 
 #[derive(Subcommand)]
+enum EventsCmd {
+    /// Stream events (NDJSON with --json). Reconnects and resumes by seq if the daemon restarts.
+    Watch {
+        /// Replay events after this seq first (0 = everything retained). Default: from now.
+        #[arg(long)]
+        since: Option<u64>,
+        /// Resource prefix such as machines/ (repeatable).
+        #[arg(long = "resource")]
+        resources: Vec<String>,
+        /// Event kind; `machine` matches every machine.* kind (repeatable).
+        #[arg(long = "kind")]
+        kinds: Vec<String>,
+        /// Exit after printing this many events.
+        #[arg(long)]
+        count: Option<u64>,
+    },
+}
+
+#[derive(Subcommand)]
 enum OpsCmd {
     List {
         #[arg(long, default_value_t = 20)]
@@ -238,7 +262,7 @@ impl From<Status> for CliError {
             {
                 10
             }
-            Code::FailedPrecondition => 5,
+            Code::FailedPrecondition | Code::OutOfRange => 5,
             Code::DeadlineExceeded => 6,
             Code::Cancelled => 7,
             Code::Internal
@@ -271,6 +295,7 @@ type Result<T> = std::result::Result<T, CliError>;
 struct Ctx {
     json: bool,
     channel: Channel,
+    socket: PathBuf,
 }
 
 impl Ctx {
@@ -701,6 +726,90 @@ async fn run_ops(ctx: &Ctx, cmd: OpsCmd) -> Result<()> {
     Ok(())
 }
 
+const RECONNECT_MIN: Duration = Duration::from_millis(100);
+const RECONNECT_MAX: Duration = Duration::from_millis(500);
+
+fn print_event(ctx: &Ctx, e: &pb::Event) {
+    if ctx.json {
+        let payload: serde_json::Value =
+            serde_json::from_str(&e.payload_json).unwrap_or(serde_json::Value::Null);
+        println!(
+            "{}",
+            json!({"seq": e.seq, "ts": e.ts, "resource": e.resource, "kind": e.kind, "payload": payload})
+        );
+    } else {
+        println!(
+            "{:>6}  {}  {:<22} {}  {}",
+            e.seq, e.ts, e.kind, e.resource, e.payload_json
+        );
+    }
+    let _ = std::io::stdout().flush();
+}
+
+/// Follow `Events.Watch`, resuming from the last printed seq after a disconnect, so a daemon
+/// restart neither loses nor repeats events.
+async fn watch_events(
+    ctx: &Ctx,
+    since: Option<u64>,
+    resources: Vec<String>,
+    kinds: Vec<String>,
+    count: Option<u64>,
+) -> Result<()> {
+    // Pin "now" to a seq so even the first reconnect resumes exactly.
+    let mut cursor = match since {
+        Some(s) => s,
+        None => {
+            DaemonClient::new(ctx.channel.clone())
+                .get_version(pb::GetVersionRequest {})
+                .await?
+                .into_inner()
+                .last_event_seq
+        }
+    };
+    let mut printed = 0u64;
+    let mut channel = ctx.channel.clone();
+    loop {
+        let req = pb::WatchEventsRequest {
+            since_seq: Some(cursor),
+            resource_prefixes: resources.clone(),
+            kinds: kinds.clone(),
+        };
+        match EventsClient::new(channel.clone()).watch(req).await {
+            Err(s) if s.code() == Code::Unavailable || s.code() == Code::Unknown => {}
+            Err(s) => return Err(s.into()),
+            Ok(resp) => {
+                let mut stream = resp.into_inner();
+                loop {
+                    match stream.message().await {
+                        Ok(Some(e)) => {
+                            cursor = e.seq;
+                            print_event(ctx, &e);
+                            printed += 1;
+                            if count.is_some_and(|c| printed >= c) {
+                                return Ok(());
+                            }
+                        }
+                        Ok(None) => break,
+                        Err(s) if s.code() == Code::OutOfRange => return Err(s.into()),
+                        Err(_) => break,
+                    }
+                }
+            }
+        };
+        if !ctx.json {
+            eprintln!("disconnected from oxboxd; reconnecting from seq {cursor}");
+        }
+        let mut delay = RECONNECT_MIN;
+        channel = loop {
+            tokio::time::sleep(delay).await;
+            if let Ok(c) = oxbox_api::connect(&ctx.socket).await {
+                break c;
+            }
+            delay = (delay * 2).min(RECONNECT_MAX);
+        };
+    }
+}
+
 fn validate_local(path: &PathBuf, json_out: bool) -> Result<()> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| CliError::new(3, format!("{}: {e}", path.display())))?;
@@ -756,10 +865,17 @@ async fn run(cli: Cli) -> Result<()> {
     let ctx = Ctx {
         json: cli.json,
         channel,
+        socket: socket.clone(),
     };
     match cli.cmd {
         Cmd::Vm(cmd) => run_vm(&ctx, cmd).await,
         Cmd::Ops(cmd) => run_ops(&ctx, cmd).await,
+        Cmd::Events(EventsCmd::Watch {
+            since,
+            resources,
+            kinds,
+            count,
+        }) => watch_events(&ctx, since, resources, kinds, count).await,
         Cmd::Version => {
             let v = DaemonClient::new(ctx.channel.clone())
                 .get_version(pb::GetVersionRequest {})

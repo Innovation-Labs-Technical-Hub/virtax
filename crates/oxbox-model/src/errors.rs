@@ -45,6 +45,8 @@ catalogue! {
         "Yêu cầu không hợp lệ.", "See `oxctl --help` for the accepted arguments.";
     API_DAEMON_RUNNING = "OXE-API-409", "Another oxboxd is already running for this user.",
         "Đã có một oxboxd khác đang chạy cho người dùng này.", "Use the running daemon, or stop it with `oxctl daemon stop`.";
+    API_RESYNC_REQUIRED = "OXE-API-410", "The event cursor is older than the retained event history.",
+        "Con trỏ sự kiện cũ hơn lịch sử sự kiện còn lưu.", "Reload the full state, then watch again without --since.";
     RT_INVALID_TRANSITION = "OXE-RT-001", "The machine cannot do this in its current state.",
         "Máy ảo không thể thực hiện thao tác này ở trạng thái hiện tại.", "Wait for the current operation to finish, or stop the machine first.";
     RT_NEEDS_POWER_OFF = "OXE-RT-002", "Some changes require the machine to be powered off.",

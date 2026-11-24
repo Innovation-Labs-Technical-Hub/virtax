@@ -3,6 +3,7 @@
 
 mod daemon;
 mod error;
+mod events;
 mod grpc;
 
 use std::os::unix::fs::PermissionsExt;
@@ -13,6 +14,7 @@ use std::time::Duration;
 use anyhow::{Context, bail};
 use clap::Parser;
 use oxbox_api::v1::daemon_server::DaemonServer;
+use oxbox_api::v1::events_server::EventsServer;
 use oxbox_api::v1::machines_server::MachinesServer;
 use oxbox_api::v1::operations_server::OperationsServer;
 use oxbox_api::v1::runtime_server::RuntimeServer;
@@ -85,6 +87,8 @@ async fn bind_socket(path: &Path) -> anyhow::Result<UnixListener> {
     Ok(listener)
 }
 
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
+
 async fn shutdown_signal() {
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .expect("SIGTERM handler");
@@ -137,12 +141,24 @@ async fn main() -> anyhow::Result<()> {
         .reconcile()
         .await
         .map_err(|e| anyhow::anyhow!("reconcile failed: {}", e.code))?;
+    let trimmed = daemon
+        .trim_journal()
+        .map_err(|e| anyhow::anyhow!("trimming the event journal failed: {}", e.code))?;
+    tracing::debug!(trimmed, "event journal trimmed");
     daemon.spawn_event_pumps();
 
     let listener = bind_socket(&socket).await?;
     tracing::info!(socket = %socket.display(), data_dir = %data_dir.display(), "oxboxd listening");
+    let stopping = daemon.shutdown.clone();
+    let signal = {
+        let stopping = stopping.clone();
+        async move {
+            shutdown_signal().await;
+            stopping.cancel();
+        }
+    };
     let api = grpc::Api(daemon);
-    Server::builder()
+    let serve = Server::builder()
         .add_service(MachinesServer::with_interceptor(
             api.clone(),
             grpc::check_peer,
@@ -155,9 +171,19 @@ async fn main() -> anyhow::Result<()> {
             api.clone(),
             grpc::check_peer,
         ))
+        .add_service(EventsServer::with_interceptor(
+            api.clone(),
+            grpc::check_peer,
+        ))
         .add_service(DaemonServer::with_interceptor(api, grpc::check_peer))
-        .serve_with_incoming_shutdown(UnixListenerStream::new(listener), shutdown_signal())
-        .await?;
+        .serve_with_incoming_shutdown(UnixListenerStream::new(listener), signal);
+    // Graceful shutdown waits for open connections; never let a stuck client hold the daemon.
+    tokio::select! {
+        served = serve => served?,
+        _ = async { stopping.cancelled().await; tokio::time::sleep(SHUTDOWN_GRACE).await } => {
+            tracing::warn!("clients still connected after {SHUTDOWN_GRACE:?}; exiting anyway");
+        }
+    }
     let _ = std::fs::remove_file(&socket);
     Ok(())
 }

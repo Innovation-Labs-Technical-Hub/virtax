@@ -6,6 +6,7 @@ use std::sync::Arc;
 use futures::Stream;
 use oxbox_api::v1 as pb;
 use oxbox_api::v1::daemon_server::Daemon as DaemonSvc;
+use oxbox_api::v1::events_server::Events;
 use oxbox_api::v1::machines_server::Machines;
 use oxbox_api::v1::operations_server::Operations;
 use oxbox_api::v1::runtime_server::Runtime;
@@ -14,6 +15,7 @@ use tonic::{Request, Response, Status};
 
 use crate::daemon::Daemon;
 use crate::error::ApiError;
+use crate::events::EventFilter;
 
 #[derive(Clone)]
 pub struct Api(pub Arc<Daemon>);
@@ -154,18 +156,22 @@ impl Operations for Api {
     ) -> Result<Response<OpStream>, Status> {
         let stream: OpStream = match self.0.watch_op(&req.into_inner().name)? {
             Err(finished) => Box::pin(futures::stream::iter([Ok(finished)])),
-            Ok(mut rx) => Box::pin(async_stream(move |tx| async move {
-                loop {
-                    let op = rx.borrow_and_update().clone();
-                    let done = op.done;
-                    if tx.send(Ok(op)).await.is_err() || done {
-                        break;
+            Ok(mut rx) => {
+                let shutdown = self.0.shutdown.clone();
+                Box::pin(async_stream(move |tx| async move {
+                    loop {
+                        let op = rx.borrow_and_update().clone();
+                        let done = op.done;
+                        if tx.send(Ok(op)).await.is_err() || done {
+                            break;
+                        }
+                        tokio::select! {
+                            _ = shutdown.cancelled() => break,
+                            changed = rx.changed() => if changed.is_err() { break },
+                        }
                     }
-                    if rx.changed().await.is_err() {
-                        break;
-                    }
-                }
-            })),
+                }))
+            }
         };
         Ok(Response::new(stream))
     }
@@ -175,6 +181,30 @@ impl Operations for Api {
         req: Request<pb::CancelOperationRequest>,
     ) -> Result<Response<pb::Operation>, Status> {
         Ok(Response::new(self.0.cancel_op(&req.into_inner().name)?))
+    }
+}
+
+type EventStream = Pin<Box<dyn Stream<Item = Result<pb::Event, Status>> + Send + 'static>>;
+
+#[tonic::async_trait]
+impl Events for Api {
+    type WatchStream = EventStream;
+
+    async fn watch(
+        &self,
+        req: Request<pb::WatchEventsRequest>,
+    ) -> Result<Response<EventStream>, Status> {
+        let r = req.into_inner();
+        let filter = EventFilter {
+            resource_prefixes: r.resource_prefixes,
+            kinds: r.kinds,
+        };
+        let rx = self.0.watch_events(r.since_seq, filter)?;
+        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+        Ok(Response::new(Box::pin(futures::StreamExt::map(
+            stream,
+            |item| item.map_err(Status::from),
+        ))))
     }
 }
 
@@ -190,6 +220,7 @@ impl DaemonSvc for Api {
             manifest_schema: SCHEMA_ID.into(),
             registry_schema: self.0.registry_schema(),
             engines: self.0.engine_kinds(),
+            last_event_seq: self.0.last_event_seq()?,
         }))
     }
 }

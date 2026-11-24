@@ -193,6 +193,34 @@ service Operations {
   rpc CancelOperation(CancelOperationRequest) returns (Operation);
 }
 
+// A by-value change notification. `seq` is global, gap-free per daemon registry and never reused,
+// so a client that stores the last `seq` it processed can resume exactly where it stopped.
+message Event {
+  uint64 seq = 1;
+  string ts = 2;
+  // machines/{uuid} | operations/{uuid}
+  string resource = 3;
+  // machine.created | machine.updated | machine.state_changed | machine.deleted |
+  // operation.updated | operation.finished
+  string kind = 4;
+  // Event-specific JSON object; see docs/events.md.
+  string payload_json = 5;
+}
+
+message WatchEventsRequest {
+  // Replay events with seq > since_seq, then follow live. Unset: live events only.
+  // A cursor older than the journal's retention fails with OUT_OF_RANGE (OXE-API-410).
+  optional uint64 since_seq = 1;
+  // Only resources starting with one of these prefixes, e.g. "machines/". Empty: all.
+  repeated string resource_prefixes = 2;
+  // Only these kinds; "machine" matches every "machine.*" kind. Empty: all.
+  repeated string kinds = 3;
+}
+
+service Events {
+  rpc Watch(WatchEventsRequest) returns (stream Event);
+}
+
 message GetVersionRequest {}
 
 message VersionInfo {
@@ -201,6 +229,8 @@ message VersionInfo {
   string manifest_schema = 3;
   uint32 registry_schema = 4;
   repeated string engines = 5;
+  // Sequence number of the newest event; pass it as since_seq to watch from "now" resumably.
+  uint64 last_event_seq = 6;
 }
 
 service Daemon {

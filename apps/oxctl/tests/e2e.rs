@@ -248,3 +248,105 @@ fn validate_reports_line_and_column_without_daemon() {
     assert_eq!(v["valid"], false);
     assert!(v["issues"][0]["line"].is_number());
 }
+
+#[test]
+fn events_watch_survives_daemon_restart_without_loss_or_duplicates() {
+    use std::io::{BufRead, BufReader};
+    use std::sync::mpsc;
+
+    let mut env = Env::new();
+    struct KillOnDrop(Child);
+    impl Drop for KillOnDrop {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    let mut watcher = Command::new(env!("CARGO_BIN_EXE_oxctl"))
+        .arg("--socket")
+        .arg(&env.socket)
+        .args(["--json", "events", "watch", "--since", "0"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let (tx, rx) = mpsc::channel::<Value>();
+    let stdout = watcher.stdout.take().unwrap();
+    let watcher = KillOnDrop(watcher);
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            let Ok(line) = line else { break };
+            if tx
+                .send(serde_json::from_str(&line).expect("each line is one JSON event"))
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+    let wait_for = |kind: &str, events: &mut Vec<Value>| {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            let e = rx
+                .recv_timeout(left)
+                .unwrap_or_else(|_| panic!("no {kind} event; got {events:?}"));
+            let done = e["kind"] == kind;
+            events.push(e);
+            if done {
+                return;
+            }
+        }
+    };
+
+    let mut events = Vec::new();
+    assert_eq!(env.json(&["vm", "create", "--name", "ev"]).0, 0);
+    assert_eq!(env.json(&["vm", "start", "ev"]).0, 0);
+    wait_for("operation.finished", &mut events);
+
+    env.stop_daemon();
+    std::thread::sleep(Duration::from_millis(300)); // the watcher is now reconnecting
+    env.start_daemon();
+    assert_eq!(
+        env.json(&["vm", "set", "ev", "--os-type", "Debian_64"]).0,
+        0
+    );
+    assert_eq!(env.json(&["vm", "delete", "ev"]).0, 0);
+    wait_for("machine.deleted", &mut events);
+    drop(watcher);
+
+    let seqs: Vec<u64> = events.iter().map(|e| e["seq"].as_u64().unwrap()).collect();
+    assert_eq!(
+        seqs,
+        (1..=seqs.len() as u64).collect::<Vec<_>>(),
+        "gap-free and duplicate-free: {seqs:?}"
+    );
+    let kinds: Vec<&str> = events.iter().map(|e| e["kind"].as_str().unwrap()).collect();
+    for k in [
+        "machine.created",
+        "operation.updated",
+        "machine.state_changed",
+        "operation.finished",
+        "machine.updated",
+        "machine.deleted",
+    ] {
+        assert!(kinds.contains(&k), "missing {k} in {kinds:?}");
+    }
+    let updated = events
+        .iter()
+        .find(|e| e["kind"] == "machine.updated")
+        .unwrap();
+    assert_eq!(updated["payload"]["summary"]["os_type"], "Debian_64");
+    assert_eq!(updated["payload"]["changed"][0], "os_type");
+}
+
+#[test]
+fn events_watch_with_expired_cursor_asks_for_resync() {
+    let env = Env::new();
+    let (code, v) = env.json(&["events", "watch", "--since", "999"]);
+    assert_eq!(
+        (code, v["error"]["code"].as_str()),
+        (5, Some("OXE-API-410"))
+    );
+}

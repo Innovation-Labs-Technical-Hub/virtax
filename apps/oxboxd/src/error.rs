@@ -41,6 +41,7 @@ fn status_for(code: OxeCode) -> Code {
         OxeCode::CFG_INVALID_MANIFEST | OxeCode::API_BAD_REQUEST => Code::InvalidArgument,
         OxeCode::CFG_NAME_TAKEN => Code::AlreadyExists,
         OxeCode::CFG_ETAG_MISMATCH => Code::Aborted,
+        OxeCode::API_RESYNC_REQUIRED => Code::OutOfRange,
         OxeCode::API_NOT_FOUND => Code::NotFound,
         OxeCode::API_PERMISSION_DENIED => Code::PermissionDenied,
         OxeCode::RT_CANCELLED => Code::Cancelled,

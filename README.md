@@ -14,11 +14,13 @@ then a Rust VMM (`oxvmm`). The design set (C4 architecture, BRDs, module index) 
   are atomic and keep a `.prev` copy; each VM folder is locked; edits use etag optimistic concurrency; the
   daemon reconciles the registry with the manifests at startup and restores damaged manifests from `.prev`.
 - The `Engine` trait (the strangler seam) and a deterministic `MockEngine`.
-- `oxctl`, which can create, list, show, set, start, stop and delete VMs, plus `ops` and `version` commands.
+- Event streaming: every change is journaled with a gap-free `seq` and served by `Events.Watch`, which
+  replays from a cursor and then follows live events. `oxctl events watch` resumes after daemon restarts.
+  See [docs/events.md](docs/events.md).
+- `oxctl`, which can create, list, show, set, start, stop and delete VMs, plus `ops`, `events` and `version` commands.
   It supports `--json`, documented exit codes, and local `vm validate` / `vm schema`.
 
-Not yet: the VirtualBox legacy engine (VBoxCAPI FFI), the console/framebuffer data plane, the Manager UI,
-`Events.Watch`, snapshots, media, networking, and Windows named pipes. **With only `MockEngine`, no guest runs.**
+Not yet: the VirtualBox legacy engine (VBoxCAPI FFI), the console/framebuffer data plane, the Manager UI, snapshots, media, networking, and Windows named pipes. **With only `MockEngine`, no guest runs.**
 
 ## Layout
 
