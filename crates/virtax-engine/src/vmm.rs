@@ -487,7 +487,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn vmm_args_require_kernel_and_one_vcpu() {
+    fn vmm_args_require_a_kernel_and_a_supported_vcpu_count() {
         let dir = tempfile::tempdir().unwrap();
         let mut m = MachineManifest::new("v", "Linux_64", EngineKind::VirtaxVmm);
         m.platform.arch = Arch::X86_64;
