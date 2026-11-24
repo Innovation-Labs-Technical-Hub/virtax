@@ -49,6 +49,11 @@ struct Args {
 
 /// A `--disk` value, checked when the arguments are parsed.
 #[derive(Debug, Clone)]
+// Only the Linux x86_64 build runs VMs; elsewhere the parsed values are never read.
+#[cfg_attr(
+    not(all(target_os = "linux", target_arch = "x86_64")),
+    allow(dead_code)
+)]
 struct DiskArg {
     path: PathBuf,
     read_only: bool,
