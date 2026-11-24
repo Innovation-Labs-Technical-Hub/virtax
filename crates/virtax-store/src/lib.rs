@@ -28,6 +28,28 @@ pub fn default_data_dir() -> PathBuf {
     })
 }
 
-pub(crate) fn now() -> String {
-    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+/// The current UTC time as RFC 3339 with milliseconds, e.g. `2026-11-24T03:11:07.673Z`. The registry stores
+/// timestamps in this fixed-width format, so they also sort and compare correctly as strings.
+pub fn now_rfc3339() -> String {
+    rfc3339(jiff::Timestamp::now())
+}
+
+pub(crate) fn rfc3339(t: jiff::Timestamp) -> String {
+    t.strftime("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn timestamps_are_fixed_width_utc_with_milliseconds() {
+        assert_eq!(
+            rfc3339(jiff::Timestamp::UNIX_EPOCH),
+            "1970-01-01T00:00:00.000Z"
+        );
+        let t = jiff::Timestamp::from_millisecond(1_795_478_400_007).unwrap();
+        assert_eq!(rfc3339(t), "2026-11-24T00:00:00.007Z");
+        assert_eq!(now_rfc3339().len(), 24);
+    }
 }

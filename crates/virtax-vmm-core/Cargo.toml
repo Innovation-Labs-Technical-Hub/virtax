@@ -4,6 +4,7 @@ description = "virtax-vmm: guest memory, x86_64 boot, legacy devices and the vCP
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish.workspace = true
 rust-version.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]

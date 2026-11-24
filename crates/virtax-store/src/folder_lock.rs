@@ -49,7 +49,7 @@ impl FolderLock {
             "host": hostname(),
             "user": std::env::var("USER").or_else(|_| std::env::var("USERNAME")).unwrap_or_default(),
             "pid": std::process::id(),
-            "since": crate::now(),
+            "since": crate::now_rfc3339(),
         });
         file.set_len(0)?;
         file.seek(SeekFrom::Start(0))?;

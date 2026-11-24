@@ -4,6 +4,7 @@ description = "virtax-vmm hypervisor backends (KVM); the only virtax-vmm crate a
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish.workspace = true
 rust-version.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]

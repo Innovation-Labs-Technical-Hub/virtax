@@ -4,6 +4,7 @@ description = "Virtax gRPC API (virtax.v1): generated types, client/server stubs
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish.workspace = true
 rust-version.workspace = true
 
 [dependencies]
