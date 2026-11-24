@@ -10,17 +10,29 @@ const KERNEL_PATH_IN_DEB: &str = "./boot/vmlinuz-7.0.0-42-generic";
 /// A statically linked busybox (Debian/Ubuntu package `busybox-static`).
 const BUSYBOX: &str = "/usr/bin/busybox";
 
-/// The test guest's `/init`: prints markers the KVM tests look for on the serial console, then
-/// reboots (which ends the VM). Kernel parameters change the ending: `virtax.hold` keeps it running,
-/// `virtax.poweroff` powers off through ACPI instead of rebooting.
+/// The test guest's `/init`: prints markers the KVM tests look for on the serial console, runs acpid
+/// so the ACPI power button powers it off, then powers off. Kernel parameters change the ending:
+/// `virtax.hold` keeps it running, `virtax.reboot` reboots instead.
 const INIT_SCRIPT: &str = "#!/bin/busybox sh
 /bin/busybox mount -t proc proc /proc
+/bin/busybox mount -t devtmpfs dev /dev
+/bin/busybox mkdir -p /var/run /var/log
 /bin/busybox echo \"VIRTAX-GUEST-OK $(/bin/busybox uname -r)\"
 /bin/busybox echo \"VIRTAX-GUEST-CMDLINE $(/bin/busybox cat /proc/cmdline)\"
 /bin/busybox echo \"VIRTAX-GUEST-CPUS $(/bin/busybox nproc)\"
+/bin/busybox echo \"VIRTAX-GUEST-DATE $(/bin/busybox date -u +%Y-%m-%d)\"
+/bin/busybox acpid -c /etc/acpi
+/bin/busybox echo VIRTAX-GUEST-ACPID
 if /bin/busybox grep -q virtax.hold /proc/cmdline; then /bin/busybox sleep 3600; fi
-if /bin/busybox grep -q virtax.poweroff /proc/cmdline; then /bin/busybox poweroff -f; fi
-/bin/busybox reboot -f
+if /bin/busybox grep -q virtax.reboot /proc/cmdline; then /bin/busybox reboot -f; fi
+/bin/busybox poweroff -f
+";
+
+/// acpid runs `/etc/acpi/PWRF/00000080` when the ACPI power button is pressed. acpid daemonizes with
+/// its output discarded, so the marker goes to the console directly.
+const POWER_BUTTON_ACTION: &str = "#!/bin/busybox sh
+/bin/busybox echo VIRTAX-GUEST-POWER-BUTTON > /dev/console
+/bin/busybox poweroff -f
 ";
 
 pub fn dir(root: &Path) -> PathBuf {
@@ -106,6 +118,15 @@ pub fn fetch(root: &Path) -> Result<(), String> {
     cpio.entry("dev/console", 0o020_600, (5 << 8) | 1, &[]);
     cpio.entry("bin/busybox", 0o100_755, 0, &busybox);
     cpio.entry("init", 0o100_755, 0, INIT_SCRIPT.as_bytes());
+    for d in ["etc", "etc/acpi", "etc/acpi/PWRF"] {
+        cpio.entry(d, 0o040_755, 0, &[]);
+    }
+    cpio.entry(
+        "etc/acpi/PWRF/00000080",
+        0o100_755,
+        0,
+        POWER_BUTTON_ACTION.as_bytes(),
+    );
     let initrd = dir.join("initramfs.cpio");
     std::fs::write(&initrd, cpio.finish()).map_err(|e| e.to_string())?;
     eprintln!("initramfs: {}", initrd.display());
