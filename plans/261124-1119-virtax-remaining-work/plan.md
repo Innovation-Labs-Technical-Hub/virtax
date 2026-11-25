@@ -27,7 +27,7 @@ scouted and planned when they start.
 | # | Phase | Priority | Effort | Depends on | Status |
 |---|-------|----------|--------|-----------|--------|
 | 1 | [Housekeeping and CI hardening](./phase-01-start.md) | P1 | 1 pw | — | Done (remote branch deletion awaits the owner) |
-| 2 | [virtio-blk over PCI](./phase-02-virtio-blk-pci.md) | P1 | 3 pw | 1 | In progress |
+| 2 | [virtio-blk over PCI](./phase-02-virtio-blk-pci.md) | P1 | 3 pw | 1 | Done |
 | 3 | [VMM security hardening](./phase-03-vmm-security-hardening.md) | P1 | 2 pw | 2 | Pending |
 | 4 | [Storage, media and snapshots](./phase-04-storage-media-snapshots.md) | P1 | 8 pw | 2 | Pending |
 | 5 | [Networking](./phase-05-networking.md) | P1 | 6 pw | 2 | Pending |
