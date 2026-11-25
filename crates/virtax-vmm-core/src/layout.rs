@@ -23,6 +23,15 @@ pub const HIMEM_START: u64 = 0x10_0000;
 pub const MMIO_GAP_START: u64 = 0xc000_0000;
 pub const MMIO_GAP_END: u64 = 0x1_0000_0000;
 
+/// PCI: ECAM configuration space for bus 0 (1 MiB) just below the I/O APIC, and the window BARs
+/// are allocated from, below it.
+pub const PCI_ECAM_BASE: u64 = 0xfeb0_0000;
+pub const PCI_ECAM_SIZE: u64 = 1 << 20;
+pub const PCI_MMIO_BASE: u64 = MMIO_GAP_START;
+pub const PCI_MMIO_END: u64 = 0xfe00_0000;
+const _: () =
+    assert!(PCI_MMIO_END <= PCI_ECAM_BASE && PCI_ECAM_BASE + PCI_ECAM_SIZE <= 0xfec0_0000);
+
 pub const MIB: u64 = 1 << 20;
 /// Smallest guest the boot path supports.
 pub const MIN_MEMORY_MIB: u64 = 64;

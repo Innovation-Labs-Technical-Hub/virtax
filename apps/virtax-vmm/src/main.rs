@@ -39,6 +39,40 @@ struct Args {
     /// Exit when the guest reboots instead of restarting it.
     #[arg(long)]
     no_reboot: bool,
+    /// Attach a raw disk image as a virtio-blk device: `<path>` or `<path>,rw` read-write,
+    /// `<path>,ro` read-only.
+    /// Repeat for more disks; the guest sees them in this order (/dev/vda, /dev/vdb, ...). Each
+    /// image is locked while the VM runs: exclusively when read-write, shared when read-only.
+    #[arg(long = "disk", value_name = "PATH[,ro|,rw]", value_parser = parse_disk)]
+    disks: Vec<DiskArg>,
+}
+
+/// A `--disk` value, checked when the arguments are parsed.
+#[derive(Debug, Clone)]
+// Only the Linux x86_64 build runs VMs; elsewhere the parsed values are never read.
+#[cfg_attr(
+    not(all(target_os = "linux", target_arch = "x86_64")),
+    allow(dead_code)
+)]
+struct DiskArg {
+    path: PathBuf,
+    read_only: bool,
+}
+
+fn parse_disk(value: &str) -> Result<DiskArg, String> {
+    // A trailing `,ro` or `,rw` is the mode; any other comma belongs to the path.
+    let (path, read_only) = if let Some(path) = value.strip_suffix(",ro") {
+        (path, true)
+    } else {
+        (value.strip_suffix(",rw").unwrap_or(value), false)
+    };
+    if path.is_empty() {
+        return Err("missing image path (expected `<path>`, `<path>,ro` or `<path>,rw`)".into());
+    }
+    Ok(DiskArg {
+        path: PathBuf::from(path),
+        read_only,
+    })
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -69,6 +103,14 @@ fn run(args: Args) -> ExitCode {
         kernel: args.kernel,
         initrd: args.initrd,
         extra_cmdline: args.cmdline,
+        disks: args
+            .disks
+            .into_iter()
+            .map(|d| virtax_vmm_core::disk::DiskConfig {
+                path: d.path,
+                read_only: d.read_only,
+            })
+            .collect(),
     };
     let no_reboot = args.no_reboot;
     let ready = |control: virtax_vmm_core::VmControl| {
@@ -146,5 +188,39 @@ fn main() -> ExitCode {
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
         .init();
-    run(Args::parse())
+    match Args::try_parse() {
+        Ok(args) => run(args),
+        Err(e) => {
+            let _ = e.print();
+            // --help and --version are not errors; a bad argument is a configuration error (1).
+            ExitCode::from(if e.use_stderr() { 1 } else { 0 })
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_disk_arguments() {
+        let d = parse_disk("a.img").unwrap();
+        assert_eq!((d.path, d.read_only), (PathBuf::from("a.img"), false));
+        let d = parse_disk("/x/b,c.img,ro").unwrap();
+        assert_eq!((d.path, d.read_only), (PathBuf::from("/x/b,c.img"), true));
+        let d = parse_disk("/x/b,c.img,rw").unwrap();
+        assert_eq!((d.path, d.read_only), (PathBuf::from("/x/b,c.img"), false));
+        let d = parse_disk("a,b.img").unwrap();
+        assert_eq!(
+            d.path,
+            PathBuf::from("a,b.img"),
+            "commas inside paths are kept"
+        );
+        assert!(
+            parse_disk(",ro")
+                .unwrap_err()
+                .contains("missing image path")
+        );
+        assert!(parse_disk("").is_err());
+    }
 }

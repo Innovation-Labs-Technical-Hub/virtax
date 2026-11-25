@@ -13,8 +13,12 @@ linux-loader = { version = "0.14", features = ["bzimage", "elf"] }
 thiserror.workspace = true
 tracing.workspace = true
 vm-memory = { version = "0.18", features = ["backend-mmap"] }
+virtio-queue = "=0.18.0"
 vm-superio = "0.8"
 vmm-sys-util = "0.15"
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

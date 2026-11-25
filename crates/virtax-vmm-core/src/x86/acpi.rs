@@ -6,6 +6,10 @@
 //! guest power itself off. The DSDT also describes COM1, the CMOS RTC and a power button raised through
 //! a Generic Event Device. The FADT declares no PS/2 controller or VGA, so Linux does not probe hardware
 //! virtax-vmm does not emulate.
+//!
+//! PCI: the MCFG table gives the ECAM address of bus 0, the DSDT's `PCI0` host bridge (`PNP0A08`)
+//! gives the bus range and the BAR window, and `MBRD` (`PNP0C02`) reserves the ECAM range, which Linux
+//! requires before it uses ECAM. The DSDT declares no `_PRT`: devices interrupt through MSI-X only.
 
 use vm_memory::{Bytes, GuestAddress, GuestMemoryMmap};
 
@@ -14,7 +18,8 @@ pub const RSDP_ADDR: u64 = 0x000e_0000;
 const XSDT_ADDR: u64 = RSDP_ADDR + 0x40;
 const FADT_ADDR: u64 = RSDP_ADDR + 0x100;
 const DSDT_ADDR: u64 = RSDP_ADDR + 0x300;
-const MADT_ADDR: u64 = RSDP_ADDR + 0x400;
+const MADT_ADDR: u64 = RSDP_ADDR + 0x1000;
+const MCFG_ADDR: u64 = RSDP_ADDR + 0x2000;
 
 /// I/O ports of the ACPI sleep control/status and reset registers.
 pub const SLEEP_CONTROL_PORT: u16 = 0x600;
@@ -145,9 +150,82 @@ fn dsdt_aml() -> Vec<u8> {
     );
     [
         aml::name("_S5_", aml::byte_package(&[S5_SLP_TYP, 0])),
-        aml::scope("_SB_", [com1, rtc, power_button, ged].concat()),
+        aml::scope(
+            "_SB_",
+            [
+                com1,
+                rtc,
+                power_button,
+                ged,
+                pci_host_bridge(),
+                ecam_reservation(),
+            ]
+            .concat(),
+        ),
     ]
     .concat()
+}
+
+/// `PCI0`: the PCIe host bridge of segment 0, forwarding bus 0 and the 32-bit BAR window.
+fn pci_host_bridge() -> Vec<u8> {
+    use super::aml;
+    use crate::layout::{PCI_MMIO_BASE, PCI_MMIO_END};
+    aml::device(
+        "PCI0",
+        [
+            aml::name("_HID", aml::eisa_id("PNP0A08")),
+            aml::name("_CID", aml::eisa_id("PNP0A03")),
+            aml::name("_ADR", aml::integer(0)),
+            aml::name("_SEG", aml::integer(0)),
+            aml::name("_UID", aml::integer(0)),
+            aml::name("_BBN", aml::integer(0)),
+            aml::name(
+                "_CRS",
+                aml::resource_template(&[
+                    aml::bus_number_descriptor(0, 0),
+                    aml::memory_window_descriptor(
+                        PCI_MMIO_BASE as u32,
+                        (PCI_MMIO_END - PCI_MMIO_BASE) as u32,
+                    ),
+                ]),
+            ),
+        ]
+        .concat(),
+    )
+}
+
+/// `MBRD`: motherboard resources, reserving the ECAM range.
+fn ecam_reservation() -> Vec<u8> {
+    use super::aml;
+    use crate::layout::{PCI_ECAM_BASE, PCI_ECAM_SIZE};
+    aml::device(
+        "MBRD",
+        [
+            aml::name("_HID", aml::eisa_id("PNP0C02")),
+            aml::name("_UID", aml::integer(0)),
+            aml::name(
+                "_CRS",
+                aml::resource_template(&[aml::memory32_fixed_descriptor(
+                    PCI_ECAM_BASE as u32,
+                    PCI_ECAM_SIZE as u32,
+                )]),
+            ),
+        ]
+        .concat(),
+    )
+}
+
+/// MCFG (PCI Firmware 3.3 §4.1.2): one ECAM allocation for segment 0, bus 0.
+fn mcfg() -> Vec<u8> {
+    use crate::layout::PCI_ECAM_BASE;
+    let mut t = Table::new(b"MCFG", 1);
+    t.zeros(8) // reserved
+        .u64(PCI_ECAM_BASE)
+        .u16(0) // segment
+        .u8(0) // first bus
+        .u8(0) // last bus
+        .zeros(4);
+    t.finish()
 }
 
 fn dsdt() -> Vec<u8> {
@@ -231,10 +309,11 @@ fn rsdp(xsdt_addr: u64) -> Vec<u8> {
 pub fn write_tables(mem: &GuestMemoryMmap, vcpus: u8) -> Result<u64, String> {
     let tables = [
         (RSDP_ADDR, rsdp(XSDT_ADDR)),
-        (XSDT_ADDR, xsdt(&[FADT_ADDR, MADT_ADDR])),
+        (XSDT_ADDR, xsdt(&[FADT_ADDR, MADT_ADDR, MCFG_ADDR])),
         (FADT_ADDR, fadt(DSDT_ADDR)),
         (DSDT_ADDR, dsdt()),
         (MADT_ADDR, madt(vcpus)),
+        (MCFG_ADDR, mcfg()),
     ];
     for w in tables.windows(2) {
         assert!(
@@ -282,7 +361,14 @@ mod tests {
 
         let madt = madt(4);
         assert_eq!(madt.len(), 36 + 8 + 4 * 8 + 12);
-        for t in [fadt, madt, dsdt(), xsdt(&[1, 2])] {
+        let mcfg = mcfg();
+        assert_eq!(mcfg.len(), 36 + 8 + 16);
+        assert_eq!(
+            u64::from_le_bytes(mcfg[44..52].try_into().unwrap()),
+            crate::layout::PCI_ECAM_BASE
+        );
+        assert_eq!(&mcfg[52..56], &[0, 0, 0, 0], "segment 0, buses 0-0");
+        for t in [fadt, madt, mcfg, dsdt(), xsdt(&[1, 2])] {
             assert!(sums_to_zero(&t));
             assert_eq!(
                 u32::from_le_bytes(t[4..8].try_into().unwrap()) as usize,
@@ -327,6 +413,9 @@ mod tests {
             b"GED0",
             b"ACPI0013",
             b"_EVT",
+            b"PCI0",
+            b"_BBN",
+            b"MBRD",
         ] {
             assert!(
                 scope.windows(device.len()).any(|w| w == device),
@@ -340,6 +429,22 @@ mod tests {
                 .any(|w| w == [0x0c, 0x41, 0xd0, 0x05, 0x01]),
             "PNP0501"
         );
+        assert!(
+            scope
+                .windows(5)
+                .any(|w| w == aml_eisa("PNP0A08").as_slice()),
+            "PCIe host bridge"
+        );
+        assert!(
+            scope
+                .windows(5)
+                .any(|w| w == aml_eisa("PNP0C02").as_slice()),
+            "ECAM reservation"
+        );
+    }
+
+    fn aml_eisa(id: &str) -> Vec<u8> {
+        super::super::aml::eisa_id(id)
     }
 
     #[test]

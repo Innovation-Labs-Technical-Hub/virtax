@@ -52,8 +52,9 @@ because those errors need `VTX-ENG-011` and the machine folder context.
 `File::try_lock_shared` for read-only ones, held for the process lifetime; the OS releases them when the process
 dies, including on `SIGKILL`.
 
-**7. CLI.** `virtax-vmm --disk <path>[,ro]`, repeatable, in attachment order; the engine builds these from the
-manifest.
+**7. CLI.** `virtax-vmm --disk <path>[,ro|,rw]`, repeatable, in attachment order; the engine builds these from
+the manifest and always writes the mode, so an image path that contains a comma stays unambiguous (a trailing
+`,ro` or `,rw` is the mode; any other comma belongs to the path).
 
 ## Risks / Trade-offs
 

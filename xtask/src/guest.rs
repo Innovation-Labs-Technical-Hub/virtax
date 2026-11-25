@@ -12,11 +12,26 @@ const BUSYBOX: &str = "/usr/bin/busybox";
 
 /// The test guest's `/init`: prints markers the KVM tests look for on the serial console, runs acpid
 /// so the ACPI power button powers it off, then powers off. Kernel parameters change the ending:
-/// `virtax.hold` keeps it running, `virtax.reboot` reboots instead.
+/// `virtax.hold` keeps it running, `virtax.reboot` reboots instead. `virtax.disktest` writes the
+/// pattern `VIRTAX-DISK-PATTERN-<disk>` to the start of each virtio disk (vda, vdb) and flushes it.
 const INIT_SCRIPT: &str = "#!/bin/busybox sh
 /bin/busybox mount -t proc proc /proc
 /bin/busybox mount -t devtmpfs dev /dev
+/bin/busybox mount -t sysfs sys /sys
 /bin/busybox mkdir -p /var/run /var/log
+/bin/busybox echo \"VIRTAX-GUEST-PCI $(/bin/busybox ls /sys/bus/pci/devices | /bin/busybox tr '\\n' ' ')\"
+if /bin/busybox grep -q virtax.disktest /proc/cmdline; then
+  for d in vda vdb; do
+    [ -b /dev/$d ] || continue
+    /bin/busybox echo \"VIRTAX-DISK $d sectors=$(/bin/busybox cat /sys/block/$d/size) ro=$(/bin/busybox cat /sys/block/$d/ro)\"
+    if /bin/busybox echo -n VIRTAX-DISK-PATTERN-$d | /bin/busybox dd of=/dev/$d conv=fsync 2>/dev/null; then
+      /bin/busybox echo \"VIRTAX-DISK-WROTE $d\"
+    else
+      /bin/busybox echo \"VIRTAX-DISK-WRITE-FAILED $d\"
+    fi
+  done
+  /bin/busybox echo VIRTAX-DISK-DONE
+fi
 /bin/busybox echo \"VIRTAX-GUEST-OK $(/bin/busybox uname -r)\"
 /bin/busybox echo \"VIRTAX-GUEST-CMDLINE $(/bin/busybox cat /proc/cmdline)\"
 /bin/busybox echo \"VIRTAX-GUEST-CPUS $(/bin/busybox nproc)\"

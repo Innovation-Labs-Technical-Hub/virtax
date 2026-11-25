@@ -1731,6 +1731,7 @@ dependencies = [
  "tokio-util",
  "uuid",
  "virtax-model",
+ "virtax-vmm-core",
 ]
 
 [[package]]
@@ -1777,9 +1778,11 @@ name = "virtax-vmm-core"
 version = "0.1.0"
 dependencies = [
  "linux-loader",
+ "tempfile",
  "thiserror",
  "tracing",
  "virtax-vmm-hv",
+ "virtio-queue",
  "vm-memory",
  "vm-superio",
  "vmm-sys-util",
@@ -1832,6 +1835,25 @@ dependencies = [
  "virtax-engine",
  "virtax-model",
  "virtax-store",
+]
+
+[[package]]
+name = "virtio-bindings"
+version = "0.2.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "091f1f09cfbf2a78563b562e7a949465cce1aef63b6065645188d995162f8868"
+
+[[package]]
+name = "virtio-queue"
+version = "0.18.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f631bfd09362a9b17f0cfd5ca3b0a1b179d153fa276f9ce86919d560891e61d6"
+dependencies = [
+ "libc",
+ "log",
+ "virtio-bindings",
+ "vm-memory",
+ "vmm-sys-util",
 ]
 
 [[package]]
