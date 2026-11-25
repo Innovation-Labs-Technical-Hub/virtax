@@ -1,7 +1,7 @@
 ---
 phase: 2
 title: "virtio-blk over PCI"
-status: in-progress
+status: done
 priority: P1
 effort: "3 person-weeks (estimate)"
 dependencies: [1]
@@ -34,7 +34,7 @@ See the change's `tasks.md` and `design.md`; ownership is `crates/virtax-vmm-cor
 - [x] 1. Run `openspec-apply-change` on `add-virtio-blk-pci` and work through its 17 tasks in order (groups 1–5); tick
       each task only when its stated verification passes.
 - [x] 2. Open a PR per task group or one PR for the change, with CI green on all jobs.
-- [ ] 3. After merge, archive the change (`openspec archive add-virtio-blk-pci`) so its requirements join the main
+- [x] 3. After merge, archive the change (`openspec archive add-virtio-blk-pci`) so its requirements join the main
       specs; run `openspec validate --all --strict`.
 
 ## Verification
